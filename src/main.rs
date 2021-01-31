@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     convert::TryFrom,
     fmt,
+    mem::swap,
     ops::{Add, Sub},
 };
 
@@ -48,12 +49,56 @@ pub struct TagSetSet {
     sets: Box<[u128]>,
 }
 
+/// Same, but optimized for dnf queries
+#[derive(Debug, Clone, Default)]
+pub struct TagSetSet2 {
+    tags: FnvHashMap<Tag, u8>,
+    sets: Box<[u128]>,
+}
+
+/// Turns an std::slice::IterMut<T> into an interator of T provided T has a default
+///
+/// This makes sense for cases where cloning is expensive, but default is cheap. E.g. Vec<T>.
+struct SliceIntoIter<'a, T>(std::slice::IterMut<'a, T>);
+
+impl<'a, T: Default + 'a> Iterator for SliceIntoIter<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| {
+            let mut r = T::default();
+            swap(x, &mut r);
+            r
+        })
+    }
+}
+
+impl From<TagSetSet> for TagSetSet2 {
+    fn from(mut value: TagSetSet) -> Self {
+        let tags: FnvHashMap<Tag, u8> = SliceIntoIter(value.tags.iter_mut())
+            .enumerate()
+            .map(|(index, tag)| (tag, index as u8))
+            .collect();
+        Self {
+            tags,
+            sets: value.sets,
+        }
+    }
+}
+
 impl TagSetSet {
     pub fn iter<'a>(&'a self) -> TagSetSetIter<'a> {
         TagSetSetIter(&self.tags, self.sets.iter())
     }
 
-    pub fn map_into(&self, target: &TagSetSet) -> Box<[u128]> {
+    pub fn dnf_query(&self, dnf: &TagSetSet) -> impl Iterator<Item = bool> + '_ {
+        let dnf = dnf.map_into(self);
+        self.sets
+            .iter()
+            .map(move |set| dnf.iter().any(move |query| is_subset(*query, *set)))
+    }
+
+    fn map_into(&self, target: &TagSetSet) -> Box<[u128]> {
         let lookup: FnvHashMap<&Tag, u64> = target
             .tags
             .iter()
@@ -65,9 +110,31 @@ impl TagSetSet {
             .iter()
             .map(|tag| lookup.get(tag).cloned().unwrap_or(128))
             .collect::<Box<_>>();
-        let result = self.sets.iter().filter_map(|mask| {
-            mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize])).ok()
-        }).collect();
+        let result = self
+            .sets
+            .iter()
+            .filter_map(|mask| {
+                mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize]))
+                    .ok()
+            })
+            .collect();
+        result
+    }
+
+    fn map_into_2(&self, target: &TagSetSet2) -> Box<[u128]> {
+        let translate = self
+            .tags
+            .iter()
+            .map(|tag| target.tags.get(tag).cloned().unwrap_or(128))
+            .collect::<Box<_>>();
+        let result = self
+            .sets
+            .iter()
+            .filter_map(|mask| {
+                mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize]))
+                    .ok()
+            })
+            .collect();
         result
     }
 }
@@ -105,12 +172,10 @@ impl TagSetSetBuilder {
     pub fn result(self) -> TagSetSet {
         let mut tags: Box<[Tag]> = (0..self.indices.len())
             .map(|_| Tag::default())
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Box<_>>();
         let mut sets: Box<[u128]> = (0..self.sets.len())
             .map(|_| u128::default())
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Box<_>>();
         for (tag, index) in self.indices.into_iter() {
             tags[index] = tag;
         }
@@ -176,19 +241,18 @@ impl TryFrom<TagSetSetIo> for TagSetSet {
     type Error = anyhow::Error;
 
     fn try_from(mut value: TagSetSetIo) -> Result<Self, Self::Error> {
+        let tags = value.0;
         let sets = value
             .1
             .iter_mut()
             .map(|index_deltas| {
                 delta_decode::<u8>(index_deltas);
-                mask_from_bits_iter(index_deltas.iter().map(|index| *index as u32))
+                // check that all indices are valid
+                anyhow::ensure!(index_deltas.iter().all(|x| (*x as usize) < tags.len()));
+                mask_from_bits_iter(index_deltas.iter().cloned())
             })
-            .collect::<anyhow::Result<Vec<u128>>>()?
-            .into();
-        Ok(Self {
-            sets,
-            tags: value.0,
-        })
+            .collect::<anyhow::Result<Box<_>>>()?;
+        Ok(Self { sets, tags })
     }
 }
 
