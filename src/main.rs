@@ -1,8 +1,11 @@
+use fmt::{Display, Write};
 use fnv::{FnvHashMap, FnvHashSet};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::binary_heap::Iter,
     convert::TryFrom,
     fmt,
+    iter::FromIterator,
     mem::swap,
     ops::{Add, Sub},
 };
@@ -15,7 +18,7 @@ extern crate quickcheck_macros;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(into = "serde_bytes::ByteBuf", from = "serde_bytes::ByteBuf")]
-pub struct Tag(Vec<u8>);
+pub struct Tag(Box<[u8]>);
 
 impl fmt::Display for Tag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -37,16 +40,46 @@ impl From<Tag> for serde_bytes::ByteBuf {
 
 impl From<serde_bytes::ByteBuf> for Tag {
     fn from(value: serde_bytes::ByteBuf) -> Self {
-        Self(value.into_vec())
+        Self(value.into_vec().into())
     }
 }
 
 /// A compact representation of a set of tag sets
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(into = "TagSetSetIo", try_from = "TagSetSetIo")]
 pub struct TagSetSet {
     tags: Box<[Tag]>,
     sets: Box<[u128]>,
+}
+
+impl Display for TagSetSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set()
+            .entries(self.iter().map(|x| x.collect::<DebugUsingDisplay<_>>()))
+            .finish()
+    }
+}
+
+struct DebugUsingDisplay<T>(Vec<T>);
+
+impl<T: Display> fmt::Debug for DebugUsingDisplay<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_char('{')?;
+        for (i, x) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_char(',')?;
+            }
+            Display::fmt(x, f)?;
+        }
+        f.write_char('}')?;
+        Ok(())
+    }
+}
+
+impl<T> FromIterator<T> for DebugUsingDisplay<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(Vec::from_iter(iter))
+    }
 }
 
 /// Same, but optimized for dnf queries
@@ -291,18 +324,24 @@ fn mask_from_bits_iter(iterator: impl IntoIterator<Item = impl Into<u64>>) -> an
     Ok(result)
 }
 
-impl TagSetSet {}
-
-fn tags(tags: &[&str]) -> TagSet {
+fn tag_set(tags: &[&str]) -> TagSet {
     tags.iter()
-        .map(|x| Tag(x.to_string().into_bytes()))
+        .map(|x| Tag(x.to_string().into_bytes().into()))
         .collect()
 }
 
+fn tag_set_set(tags: &[&[&str]]) -> TagSetSet {
+    let mut builder = TagSetSetBuilder::default();
+    for tags in tags.iter().map(|x| tag_set(x)) {
+        builder.push(tags).unwrap();
+    }
+    builder.result()
+}
+
 fn main() -> anyhow::Result<()> {
-    let a = tags(&["a", "b", "x", "y"]);
-    let b = tags(&["a", "x", "y"]);
-    let c = tags(&["a", "b", "y"]);
+    let a = tag_set(&["a", "b", "x", "y"]);
+    let b = tag_set(&["a", "x", "y"]);
+    let c = tag_set(&["a", "b", "y"]);
     let mut builder = TagSetSetBuilder::default();
     builder.push(a)?;
     builder.push(b)?;
@@ -318,7 +357,49 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use quickcheck::Arbitrary;
+
     use super::*;
+
+    #[test]
+    fn dnf_query() {
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
+            let dnf = tag_set_set(&[&["a"]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[true, true, false]);
+        }
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
+            let dnf = tag_set_set(&[&["a", "b"]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[true, false, false]);
+        }
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
+            let dnf = tag_set_set(&[&["a", "x"]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[false, false, false]);
+        }
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
+            let dnf = tag_set_set(&[&[]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[true, true, true]);
+        }
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
+            let dnf = tag_set_set(&[&["c"]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[false, true, true]);
+        }
+        {
+            let tags = tag_set_set(&[&["a", "b"], &["b", "c"], &["c", "d"]]);
+            let dnf = tag_set_set(&[&["a"], &["d"]]);
+            let indexes = tags.dnf_query(&dnf).collect::<Box<_>>();
+            assert_eq!(indexes.as_ref(), &[true, false, true]);
+        }
+    }
 
     #[quickcheck]
     fn bits_iter_roundtrip(value: u128) -> bool {
@@ -336,4 +417,37 @@ mod tests {
         delta_decode::<u8>(&mut values);
         values == reference
     }
+
+    #[quickcheck]
+    fn tag_set_set_cbor_roundtrip(value: TagSetSet) -> bool {
+        let bytes = serde_cbor::to_vec(&value).unwrap();
+        let value1 = serde_cbor::from_slice(&bytes).unwrap();
+        value == value1
+    }
+
+    impl Arbitrary for Tag {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let tag = g.choose(TAG_NAMES).unwrap();
+            Tag(tag.as_bytes().to_vec().into())
+        }
+    }
+
+    impl Arbitrary for TagSetSet {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let tags: FnvHashSet<Tag> = Arbitrary::arbitrary(g);
+            let mut sets: Vec<u128> = Arbitrary::arbitrary(g);
+            let mut tags = tags.into_iter().collect::<Vec<_>>();
+            tags.truncate(128);
+            let mask = !(u128::max_value() << tags.len());
+            sets.iter_mut().for_each(|set| *set &= mask);
+            sets.sort();
+            sets.dedup();
+            Self {
+                sets: sets.into(),
+                tags: tags.into(),
+            }
+        }
+    }
+
+    const TAG_NAMES: &[&'static str] = &["a", "b", "c", "d", "e", "f"];
 }
