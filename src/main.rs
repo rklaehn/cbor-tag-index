@@ -1,14 +1,21 @@
+use core::slice;
 use fmt::{Display, Write};
 use fnv::{FnvHashMap, FnvHashSet};
+use libipld::{
+    cbor::DagCborCodec,
+    cid::multibase::Result,
+    codec::{Decode, Encode},
+    DagCbor,
+};
+use num_traits::{WrappingAdd, WrappingSub};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::binary_heap::Iter,
     convert::TryFrom,
     fmt,
     iter::FromIterator,
     mem::swap,
-    ops::{Add, Sub},
 };
+use vec_collections::VecSet;
 
 #[cfg(test)]
 extern crate quickcheck;
@@ -16,8 +23,9 @@ extern crate quickcheck;
 #[macro_use(quickcheck)]
 extern crate quickcheck_macros;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(into = "serde_bytes::ByteBuf", from = "serde_bytes::ByteBuf")]
+type IndexSet = VecSet<[u32; 4]>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
 pub struct Tag(Box<[u8]>);
 
 impl fmt::Display for Tag {
@@ -45,11 +53,160 @@ impl From<serde_bytes::ByteBuf> for Tag {
 }
 
 /// A compact representation of a set of tag sets
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(into = "TagSetSetIo", try_from = "TagSetSetIo")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, DagCbor)]
 pub struct TagSetSet {
-    tags: Box<[Tag]>,
-    sets: Box<[u128]>,
+    tags: Vec<Tag>,
+    sets: Bitmap,
+}
+
+/// A bitmap with a dense and a sparse case
+#[derive(Debug, Clone, PartialEq, Eq, DagCbor)]
+enum Bitmap {
+    Dense(DenseBitmap),
+    Sparse(SparseBitmap),
+}
+
+impl From<SparseBitmap> for Bitmap {
+    fn from(value: SparseBitmap) -> Self {
+        Self::Sparse(value)
+    }
+}
+
+impl From<DenseBitmap> for Bitmap {
+    fn from(value: DenseBitmap) -> Self {
+        Self::Dense(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct DenseBitmap(Vec<u128>);
+
+impl DenseBitmap {
+    fn rows(&self) -> BitmapRowsIter<'_> {
+        BitmapRowsIter::Dense(self.0.iter())
+    }
+}
+
+impl From<DenseBitmap> for SparseBitmap {
+    fn from(value: DenseBitmap) -> Self {
+        Self(
+            value
+                .0
+                .into_iter()
+                .map(|mask| OneBitsIterator(mask).collect())
+                .collect(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SparseBitmap(Vec<IndexSet>);
+
+impl SparseBitmap {
+    fn rows(&self) -> BitmapRowsIter<'_> {
+        BitmapRowsIter::Sparse(self.0.iter())
+    }
+}
+
+impl Default for Bitmap {
+    fn default() -> Self {
+        Bitmap::Dense(Default::default())
+    }
+}
+
+impl Bitmap {
+    fn rows(&self) -> BitmapRowsIter<'_> {
+        match self {
+            Self::Dense(x) => x.rows(),
+            Self::Sparse(x) => x.rows(),
+        }
+    }
+}
+
+impl Encode<DagCborCodec> for SparseBitmap {
+    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+        let rows: Vec<Vec<u32>> = self
+            .rows()
+            .map(|row_iter| row_iter.collect::<Vec<_>>())
+            .collect();
+        rows.iter_mut().map(|row| delta_encode(row));
+        rows.encode(c, w)?;
+        Ok(())
+    }
+}
+
+impl Encode<DagCborCodec> for DenseBitmap {
+    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+        let rows: Vec<Vec<u32>> = self
+            .rows()
+            .map(|row_iter| row_iter.collect::<Vec<_>>())
+            .collect();
+        rows.iter_mut().map(|row| delta_encode(row));
+        rows.encode(c, w)?;
+        Ok(())
+    }
+}
+
+impl Decode<DagCborCodec> for SparseBitmap {
+    fn decode<R: std::io::Read + std::io::Seek>(
+        c: DagCborCodec,
+        r: &mut R,
+    ) -> anyhow::Result<Self> {
+        let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
+        rows.iter_mut().for_each(|row| delta_decode(row));
+        Ok(Self(
+            rows.into_iter()
+                .map(|row| row.into_iter().collect::<VecSet<_>>())
+                .collect(),
+        ))
+    }
+}
+
+impl Decode<DagCborCodec> for DenseBitmap {
+    fn decode<R: std::io::Read + std::io::Seek>(
+        c: DagCborCodec,
+        r: &mut R,
+    ) -> anyhow::Result<Self> {
+        let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
+        rows.iter_mut().for_each(|row| delta_decode(row));
+        Ok(Self(
+            rows.into_iter()
+                .map(|row| mask_from_bits_iter(row))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ))
+    }
+}
+
+enum BitmapRowsIter<'a> {
+    Dense(slice::Iter<'a, u128>),
+    Sparse(slice::Iter<'a, IndexSet>),
+}
+
+impl<'a> Iterator for BitmapRowsIter<'a> {
+    type Item = BitmapRowIter<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Dense(x) => x.next().map(|x| BitmapRowIter::Dense(OneBitsIterator(*x))),
+            Self::Sparse(x) => x.next().map(|x| BitmapRowIter::Sparse(x.as_ref().iter())),
+        }
+    }
+}
+
+enum BitmapRowIter<'a> {
+    Dense(OneBitsIterator),
+    Sparse(slice::Iter<'a, u32>),
+}
+
+impl<'a> Iterator for BitmapRowIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Dense(x) => x.next(),
+            Self::Sparse(x) => x.next().cloned(),
+        }
+    }
 }
 
 impl Display for TagSetSet {
@@ -86,7 +243,7 @@ impl<T> FromIterator<T> for DebugUsingDisplay<T> {
 #[derive(Debug, Clone, Default)]
 pub struct TagSetSet2 {
     tags: FnvHashMap<Tag, u8>,
-    sets: Box<[u128]>,
+    sets: Bitmap,
 }
 
 /// Turns an std::slice::IterMut<T> into an interator of T provided T has a default
@@ -121,70 +278,86 @@ impl From<TagSetSet> for TagSetSet2 {
 
 impl TagSetSet {
     pub fn iter<'a>(&'a self) -> TagSetSetIter<'a> {
-        TagSetSetIter(&self.tags, self.sets.iter())
+        TagSetSetIter(&self.tags, self.sets.rows())
+    }
+
+    fn index_lut(&self) -> FnvHashMap<&Tag, u32> {
+        self.tags
+            .iter()
+            .enumerate()
+            .map(|(index, tag)| (tag, u32::try_from(index).unwrap()))
+            .collect()
+    }
+
+    fn map_into(&self, target: &TagSetSet) -> Bitmap {
+        let lookup = target.index_lut();
+        let translate = self
+            .tags
+            .iter()
+            .map(|tag| lookup.get(tag).cloned())
+            .collect::<Box<_>>();
+
+        match self.sets {
+            Bitmap::Dense(x) => DenseBitmap(
+                x.rows()
+                    .filter_map(|row| {
+                        mask_from_bits_iter(
+                            row.map(|index| translate[index as usize].unwrap_or(128)),
+                        )
+                        .ok()
+                    })
+                    .collect(),
+            )
+            .into(),
+            Bitmap::Sparse(x) => SparseBitmap(
+                x.rows()
+                    .filter_map(|row| {
+                        row.map(|index| translate[index as usize])
+                            .collect::<Option<IndexSet>>()
+                    })
+                    .collect(),
+            )
+            .into(),
+        }
     }
 
     pub fn dnf_query(&self, dnf: &TagSetSet) -> impl Iterator<Item = bool> + '_ {
         let dnf = dnf.map_into(self);
-        self.sets
-            .iter()
-            .map(move |set| dnf.iter().any(move |query| is_subset(*query, *set)))
+        // self.sets
+        //     .rows()
+        //     .map(move |set| dnf.0.iter().any(move |query| is_subset(*query, *set)))
+        todo!()
     }
 
-    fn map_into(&self, target: &TagSetSet) -> Box<[u128]> {
-        let lookup: FnvHashMap<&Tag, u64> = target
-            .tags
-            .iter()
-            .enumerate()
-            .map(|(index, tag)| (tag, index as u64))
-            .collect();
-        let translate = self
-            .tags
-            .iter()
-            .map(|tag| lookup.get(tag).cloned().unwrap_or(128))
-            .collect::<Box<_>>();
-        let result = self
-            .sets
-            .iter()
-            .filter_map(|mask| {
-                mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize]))
-                    .ok()
-            })
-            .collect();
-        result
-    }
-
-    fn map_into_2(&self, target: &TagSetSet2) -> Box<[u128]> {
-        let translate = self
-            .tags
-            .iter()
-            .map(|tag| target.tags.get(tag).cloned().unwrap_or(128))
-            .collect::<Box<_>>();
-        let result = self
-            .sets
-            .iter()
-            .filter_map(|mask| {
-                mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize]))
-                    .ok()
-            })
-            .collect();
-        result
-    }
+    // fn map_into_2(&self, target: &TagSetSet2) -> Box<[u128]> {
+    //     let translate = self
+    //         .tags
+    //         .iter()
+    //         .map(|tag| target.tags.get(tag).cloned().unwrap_or(128))
+    //         .collect::<Box<_>>();
+    //     let result = self
+    //         .sets
+    //         .iter()
+    //         .filter_map(|mask| {
+    //             mask_from_bits_iter(OneBitsIterator(*mask).map(|index| translate[index as usize]))
+    //                 .ok()
+    //         })
+    //         .collect();
+    //     result
+    // }
 }
 
-pub struct TagSetSetIter<'a>(&'a [Tag], std::slice::Iter<'a, u128>);
+pub struct TagSetSetIter<'a>(&'a [Tag], BitmapRowsIter<'a>);
 
 impl<'a> Iterator for TagSetSetIter<'a> {
     type Item = TagRefIter<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.1
-            .next()
-            .map(|mask| TagRefIter(self.0, OneBitsIterator(*mask)))
+        self.1.next().map(|iter| TagRefIter(self.0, iter))
     }
 }
 
-pub struct TagRefIter<'a>(&'a [Tag], OneBitsIterator);
+pub struct TagRefIter<'a>(&'a [Tag], BitmapRowIter<'a>);
 
 impl<'a> Iterator for TagRefIter<'a> {
     type Item = &'a Tag;
@@ -203,9 +376,9 @@ pub struct TagSetSetBuilder {
 
 impl TagSetSetBuilder {
     pub fn result(self) -> TagSetSet {
-        let mut tags: Box<[Tag]> = (0..self.indices.len())
+        let mut tags: Vec<Tag> = (0..self.indices.len())
             .map(|_| Tag::default())
-            .collect::<Box<_>>();
+            .collect();
         let mut sets: Box<[u128]> = (0..self.sets.len())
             .map(|_| u128::default())
             .collect::<Box<_>>();
@@ -215,7 +388,10 @@ impl TagSetSetBuilder {
         for (mask, index) in self.sets.into_iter() {
             sets[index] = mask;
         }
-        TagSetSet { tags, sets }
+        TagSetSet {
+            tags,
+            sets: Bitmap::Dense(DenseBitmap(sets.into())),
+        }
     }
 
     pub fn push(&mut self, tags: TagSet) -> anyhow::Result<usize> {
@@ -238,54 +414,15 @@ impl TagSetSetBuilder {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TagSetSetIo(Box<[Tag]>, Box<[Box<[u8]>]>);
-
-fn delta_encode<T: Sub<Output = T> + Copy>(data: &mut [T]) {
+fn delta_encode<T: WrappingSub<Output = T> + Copy>(data: &mut [T]) {
     for i in (1..data.len()).rev() {
-        data[i] = data[i] - data[i - 1];
+        data[i] = data[i].wrapping_sub(&data[i - 1]);
     }
 }
 
-fn delta_decode<T: Add<Output = T> + Copy>(data: &mut [u8]) {
+fn delta_decode<T: WrappingAdd<Output = T> + Copy>(data: &mut [T]) {
     for i in 1..data.len() {
-        data[i] = data[i] + data[i - 1];
-    }
-}
-
-impl From<TagSetSet> for TagSetSetIo {
-    fn from(value: TagSetSet) -> Self {
-        let bits = value
-            .sets
-            .iter()
-            .map(|set| {
-                let mut indices = OneBitsIterator(*set)
-                    .map(|index| index as u8)
-                    .collect::<Box<_>>();
-                delta_encode::<u8>(&mut indices);
-                indices
-            })
-            .collect();
-        Self(value.tags, bits)
-    }
-}
-
-impl TryFrom<TagSetSetIo> for TagSetSet {
-    type Error = anyhow::Error;
-
-    fn try_from(mut value: TagSetSetIo) -> Result<Self, Self::Error> {
-        let tags = value.0;
-        let sets = value
-            .1
-            .iter_mut()
-            .map(|index_deltas| {
-                delta_decode::<u8>(index_deltas);
-                // check that all indices are valid
-                anyhow::ensure!(index_deltas.iter().all(|x| (*x as usize) < tags.len()));
-                mask_from_bits_iter(index_deltas.iter().cloned())
-            })
-            .collect::<anyhow::Result<Box<_>>>()?;
-        Ok(Self { sets, tags })
+        data[i] = data[i].wrapping_add(&data[i - 1]);
     }
 }
 
@@ -357,6 +494,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use libipld::codec::Codec;
     use quickcheck::Arbitrary;
 
     use super::*;
@@ -420,8 +558,8 @@ mod tests {
 
     #[quickcheck]
     fn tag_set_set_cbor_roundtrip(value: TagSetSet) -> bool {
-        let bytes = serde_cbor::to_vec(&value).unwrap();
-        let value1 = serde_cbor::from_slice(&bytes).unwrap();
+        let bytes = DagCborCodec.encode(&value).unwrap();
+        let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
     }
 
@@ -443,7 +581,7 @@ mod tests {
             sets.sort();
             sets.dedup();
             Self {
-                sets: sets.into(),
+                sets: DenseBitmap(sets.into()).into(),
                 tags: tags.into(),
             }
         }
