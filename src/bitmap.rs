@@ -6,8 +6,10 @@ use libipld::{
     DagCbor,
 };
 use num_traits::{WrappingAdd, WrappingSub};
-use std::{iter::FromIterator, ops::Index, result};
+use std::{iter::FromIterator, ops::Index, result, usize};
 use vec_collections::VecSet;
+
+use crate::util::IterExt;
 
 // set for the sparse case
 pub(crate) type IndexSet = VecSet<[u32; 4]>;
@@ -32,6 +34,13 @@ impl Bitmap {
         match self {
             Self::Dense(x) => x.rows(),
             Self::Sparse(x) => x.rows(),
+        }
+    }
+
+    pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
+        match self {
+            Self::Dense(x) => x.row(index).left_iter(),
+            Self::Sparse(x) => x.row(index).right_iter(),
         }
     }
 
@@ -85,6 +94,10 @@ impl DenseBitmap {
 
     pub fn rows(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
+        OneBitsIterator(self.0[index])
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, IndexMask> {
@@ -145,6 +158,10 @@ impl SparseBitmap {
     pub fn iter(&self) -> std::slice::Iter<'_, IndexSet> {
         self.0.iter()
     }
+
+    pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
+        self.0[index].iter().cloned()
+    }
 }
 
 impl Encode<DagCborCodec> for SparseBitmap {
@@ -204,6 +221,11 @@ impl Decode<DagCborCodec> for DenseBitmap {
 pub(crate) enum BitmapRowsIter<'a> {
     Dense(slice::Iter<'a, IndexMask>),
     Sparse(slice::Iter<'a, IndexSet>),
+}
+
+pub(crate) enum BitmapRowsIntoIter {
+    Dense(u64),
+    Sparse(u64),
 }
 
 impl<'a> Iterator for BitmapRowsIter<'a> {

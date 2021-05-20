@@ -5,8 +5,9 @@ use libipld::{
     DagCbor,
 };
 use libipld_cbor::DagCborCodec;
-use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap};
+use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap, ops::Index, usize};
 mod bitmap;
+mod util;
 use bitmap::*;
 
 #[cfg(test)]
@@ -215,6 +216,11 @@ impl TagIndex {
         })
     }
 
+    pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
+        let lut = self.tags.tags().collect::<Vec<_>>();
+        self.events.iter().map(move |offset| lut[*offset as usize].clone())
+    }
+
     pub fn len(&self) -> usize {
         self.events.len()
     }
@@ -256,7 +262,7 @@ impl From<TagSetSet> for DnfQuery {
         for (tag, index) in value.tags {
             tags[index as usize] = Some(tag)
         }
-        let tags = tags.into_iter().filter_map(|x| x).collect();
+        let tags: Vec<Tag> = tags.into_iter().filter_map(|x| x).collect();
         Self {
             tags,
             sets: value.sets,
@@ -274,16 +280,31 @@ impl TagSetSet {
         dnf_query0(&self.sets, dnf, &translate, result);
     }
 
-    pub fn dnf_query_res(&self, dnf: &DnfQuery) -> Vec<bool> {
-        let mut result = vec![true; self.sets.rows()];
-        self.dnf_query(dnf, &mut result);
-        result
+    fn lut(&self) -> Vec<Tag> {
+        let mut tags = vec![None; self.tags.len()];
+        for (tag, index) in &self.tags {
+            tags[*index as usize] = Some(tag)
+        }
+        tags.into_iter().filter_map(|x| x.cloned()).collect()
+    }
+
+    /// get back the tag sets the tag index was created from, in order
+    pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
+        let lut = self.lut();
+        self.sets.iter().map(
+            move |row| row.map(|i| lut[i as usize].clone()).collect::<TagSet>()
+        )
     }
 }
 
 impl DnfQuery {
     pub fn iter<'a>(&'a self) -> TagSetSetIter<'a> {
         TagSetSetIter(&self.tags, self.sets.iter())
+    }
+
+    /// get back the tag sets the dnf query 
+    pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
+        self.sets.iter().map(move |rows| rows.map(|index| self.tags[index as usize].clone()).collect())
     }
 }
 
@@ -510,6 +531,20 @@ mod tests {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
+    }
+
+    #[quickcheck]
+    fn set_matching(index: TagIndex, query: DnfQuery) -> bool {
+        let mut bits1 = vec![true; index.len()];
+        let mut bits2 = vec![false; index.len()];
+        query.set_matching(&index, &mut bits1);
+
+        let query_tags = query.tags().collect::<Vec<_>>();
+        for (tags, matching) in index.tags().zip(bits2.iter_mut()) {
+            *matching = query_tags.iter().any(|q| q.is_subset(&tags))
+        }
+        println!("{:?}", bits1);
+        bits1 == bits2
     }
 
     impl Arbitrary for Tag {
