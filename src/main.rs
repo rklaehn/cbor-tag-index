@@ -1,14 +1,9 @@
-use core::slice;
 use fmt::{Display, Write};
 use fnv::{FnvHashMap, FnvHashSet};
-use libipld::{
-    cbor::DagCborCodec,
-    codec::{Decode, Encode},
-    DagCbor,
-};
-use num_traits::{WrappingAdd, WrappingSub};
-use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap, result};
-use vec_collections::VecSet;
+use libipld::DagCbor;
+use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap};
+mod bitmap;
+use bitmap::*;
 
 #[cfg(test)]
 extern crate quickcheck;
@@ -16,11 +11,96 @@ extern crate quickcheck;
 #[macro_use(quickcheck)]
 extern crate quickcheck_macros;
 
-type IndexSet = VecSet<[u32; 4]>;
-type IndexMask = u128;
-
+/// our toy tag
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
 pub struct Tag(Box<[u8]>);
+
+/// a set of tags
+type TagSet = FnvHashSet<Tag>;
+
+/// A compact representation of a seq of tag sets,
+///
+/// to be used as a DNF query.
+///
+/// `tags` are a sequence of strings, where the offset corresponds to the
+/// set bit in the bitmap.
+///
+/// E.g. ("a" & "b") | ("b" & "c") | ("d") would be encoded as
+///
+/// {
+///   tags: ["a", "b", "c", "d"],
+///   sets: [
+///     b0011,
+///     b0110,
+///     b1000,
+///   ]
+/// }
+#[derive(Debug, Clone, Default, PartialEq, Eq, DagCbor)]
+pub struct DnfQuery {
+    tags: Vec<Tag>,
+    sets: Bitmap,
+}
+
+/// Same as a [DnfQuery], but with optimized support for translation.
+///
+/// In this representation, `tags` is a map from tag to index.
+///
+/// E.g. ("a" & "b") | ("b" & "c") | ("d") would be encoded as
+///
+/// {
+///   tags: {
+///     "a": 0,
+///     "b": 1,
+///     "c": 2,
+///     "d": 3
+///   },
+///   sets: [
+///     b0011,
+///     b0110,
+///     b1000,
+///   ]
+/// }
+#[derive(Debug, Clone, Default)]
+pub struct TagSetSet {
+    tags: FnvHashMap<Tag, u32>,
+    sets: Bitmap,
+}
+
+/// A tag index, using a [TagSetSet] to encode the distinct tag sets, and a vector
+/// of offsets for each event.
+///
+/// A sequence of events with the following tag sets:
+///
+///```
+/// [{"a"}, {"a", "b"}, {"b","c"}, {"a"}]
+///```
+///
+/// would be encoded like this:
+///
+///```
+/// {
+///   tags: {
+///     tags: { "a": 0, "b": 1, "c": 2 },
+///     sets: [
+///       b001, //   a
+///       b010, //  b
+///       b110, // cb
+///   },
+///   events: [
+///     0, // first bitset
+///     1, // 2nd bitset
+///     2, // 3rd bitset
+///     0, // first bitset again
+///   ],
+/// }
+///```
+#[derive(Debug, Clone)]
+pub struct TagIndex {
+    /// efficiently encoded distinct tags
+    tags: TagSetSet,
+    /// tag offset for each event
+    events: Vec<u32>,
+}
 
 impl fmt::Display for Tag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -31,8 +111,6 @@ impl fmt::Display for Tag {
         }
     }
 }
-
-type TagSet = FnvHashSet<Tag>;
 
 impl From<Tag> for serde_bytes::ByteBuf {
     fn from(value: Tag) -> Self {
@@ -46,17 +124,21 @@ impl From<serde_bytes::ByteBuf> for Tag {
     }
 }
 
-/// A compact representation of a seq of tag sets
-#[derive(Debug, Clone, Default, PartialEq, Eq, DagCbor)]
-pub struct DnfQuery {
-    tags: Vec<Tag>,
-    sets: Bitmap,
-}
-
 impl DnfQuery {
-    fn set_matching(&self, index: TagIndex, matches: &mut [bool]) {
+
+    pub fn new<'a>(sets: impl IntoIterator<Item = &'a TagSet>) -> anyhow::Result<Self> {
+        let mut builder = TagSetSetBuilder::default();
+        for set in sets {
+            builder.push(&set)?;
+        }
+        Ok(builder.dnf_query())
+    }
+
+    /// given a bitmap of matches, corresponding to the events in the index,
+    /// set those bytes to false that do not match.
+    pub fn set_matching(&self, index: &TagIndex, matches: &mut [bool]) {
         // create a bool array corresponding to the distinct tagsets in the index
-        let mut tmp = vec![false; index.tags.sets.len()];
+        let mut tmp = vec![false; index.tags.sets.rows()];
         // set the fields we need to look at to true
         for (matching, index) in matches.iter().zip(index.events.iter()) {
             if *matching {
@@ -68,201 +150,6 @@ impl DnfQuery {
         // write result from tmp
         for (matching, index) in matches.iter_mut().zip(index.events.iter()) {
             *matching = *matching && tmp[*index as usize];
-        }
-    }
-}
-
-/// A bitmap with a dense and a sparse case
-#[derive(Debug, Clone, PartialEq, Eq, DagCbor)]
-enum Bitmap {
-    Dense(DenseBitmap),
-    Sparse(SparseBitmap),
-}
-
-impl From<SparseBitmap> for Bitmap {
-    fn from(value: SparseBitmap) -> Self {
-        Self::Sparse(value)
-    }
-}
-
-impl From<DenseBitmap> for Bitmap {
-    fn from(value: DenseBitmap) -> Self {
-        Self::Dense(value)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct DenseBitmap(Vec<IndexMask>);
-
-impl DenseBitmap {
-    fn rows(&self) -> BitmapRowsIter<'_> {
-        BitmapRowsIter::Dense(self.0.iter())
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-impl From<DenseBitmap> for SparseBitmap {
-    fn from(value: DenseBitmap) -> Self {
-        Self(
-            value
-                .0
-                .into_iter()
-                .map(|mask| OneBitsIterator(mask).collect())
-                .collect(),
-        )
-    }
-}
-
-impl<I: IntoIterator<Item = u32>> FromIterator<I> for Bitmap {
-    fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
-        let mut res = Bitmap::default();
-        for set in iter.into_iter() {
-            res = res.push(set.into_iter())
-        }
-        res
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SparseBitmap(Vec<IndexSet>);
-
-impl SparseBitmap {
-    fn rows(&self) -> BitmapRowsIter<'_> {
-        BitmapRowsIter::Sparse(self.0.iter())
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-}
-
-impl Default for Bitmap {
-    fn default() -> Self {
-        Bitmap::Dense(Default::default())
-    }
-}
-
-impl Bitmap {
-    fn rows(&self) -> BitmapRowsIter<'_> {
-        match self {
-            Self::Dense(x) => x.rows(),
-            Self::Sparse(x) => x.rows(),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Dense(x) => x.len(),
-            Self::Sparse(x) => x.len(),
-        }
-    }
-
-    fn push(self, iter: impl IntoIterator<Item = u32>) -> Self {
-        match self {
-            Self::Dense(mut inner) => match to_mask_or_set(iter) {
-                Ok(mask) => {
-                    inner.0.push(mask);
-                    inner.into()
-                }
-                Err(set) => {
-                    let mut inner = SparseBitmap::from(inner);
-                    inner.0.push(set);
-                    inner.into()
-                }
-            },
-            Self::Sparse(mut inner) => {
-                inner.0.push(iter.into_iter().collect());
-                inner.into()
-            }
-        }
-    }
-}
-
-impl Encode<DagCborCodec> for SparseBitmap {
-    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
-        let mut rows: Vec<Vec<u32>> = self
-            .rows()
-            .map(|row_iter| row_iter.collect::<Vec<_>>())
-            .collect();
-        rows.iter_mut().for_each(|row| delta_encode(row));
-        rows.encode(c, w)?;
-        Ok(())
-    }
-}
-
-impl Encode<DagCborCodec> for DenseBitmap {
-    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
-        let mut rows: Vec<Vec<u32>> = self
-            .rows()
-            .map(|row_iter| row_iter.collect::<Vec<_>>())
-            .collect();
-        rows.iter_mut().for_each(|row| delta_encode(row));
-        rows.encode(c, w)?;
-        Ok(())
-    }
-}
-
-impl Decode<DagCborCodec> for SparseBitmap {
-    fn decode<R: std::io::Read + std::io::Seek>(
-        c: DagCborCodec,
-        r: &mut R,
-    ) -> anyhow::Result<Self> {
-        let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
-        rows.iter_mut().for_each(|row| delta_decode(row));
-        Ok(Self(
-            rows.into_iter()
-                .map(|row| row.into_iter().collect::<VecSet<_>>())
-                .collect(),
-        ))
-    }
-}
-
-impl Decode<DagCborCodec> for DenseBitmap {
-    fn decode<R: std::io::Read + std::io::Seek>(
-        c: DagCborCodec,
-        r: &mut R,
-    ) -> anyhow::Result<Self> {
-        let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
-        rows.iter_mut().for_each(|row| delta_decode(row));
-        Ok(Self(
-            rows.into_iter()
-                .map(|row| mask_from_bits_iter(row))
-                .collect::<anyhow::Result<Vec<_>>>()?,
-        ))
-    }
-}
-
-enum BitmapRowsIter<'a> {
-    Dense(slice::Iter<'a, IndexMask>),
-    Sparse(slice::Iter<'a, IndexSet>),
-}
-
-impl<'a> Iterator for BitmapRowsIter<'a> {
-    type Item = BitmapRowIter<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Dense(x) => x.next().map(|x| BitmapRowIter::Dense(OneBitsIterator(*x))),
-            Self::Sparse(x) => x.next().map(|x| BitmapRowIter::Sparse(x.as_ref().iter())),
-        }
-    }
-}
-
-enum BitmapRowIter<'a> {
-    Dense(OneBitsIterator),
-    Sparse(slice::Iter<'a, u32>),
-}
-
-impl<'a> Iterator for BitmapRowIter<'a> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Dense(x) => x.next(),
-            Self::Sparse(x) => x.next().cloned(),
         }
     }
 }
@@ -297,30 +184,21 @@ impl<T> FromIterator<T> for DebugUsingDisplay<T> {
     }
 }
 
-/// Same, but optimized for dnf queries
-#[derive(Debug, Clone, Default)]
-pub struct TagSetSet {
-    tags: FnvHashMap<Tag, u32>,
-    sets: Bitmap,
-}
-
-#[derive(Debug, Clone)]
-struct TagIndex {
-    tags: TagSetSet,
-    events: Vec<u32>,
-}
-
 impl TagIndex {
-    pub fn from_elements(e: &[TagSet]) -> Self {
+    pub fn new(e: &[TagSet]) -> anyhow::Result<Self> {
         let mut builder = TagSetSetBuilder::default();
         let events = e
             .iter()
-            .map(|set| builder.push_ref(set).unwrap())
-            .collect::<Vec<_>>();
-        Self {
-            tags: builder.tagsetset(),
+            .map(|set| builder.push(set))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            tags: builder.tag_set_set(),
             events,
-        }
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
     }
 }
 
@@ -345,7 +223,7 @@ impl From<DnfQuery> for TagSetSet {
     fn from(mut value: DnfQuery) -> Self {
         let tags: FnvHashMap<Tag, u32> = SliceIntoIter(value.tags.iter_mut())
             .enumerate()
-            .map(|(index, tag)| (tag, index as u32))
+            .map(|(index, tag)| (tag, u32::try_from(index).unwrap()))
             .collect();
         Self {
             tags,
@@ -379,7 +257,7 @@ impl TagSetSet {
     }
 
     pub fn dnf_query_res(&self, dnf: &DnfQuery) -> Vec<bool> {
-        let mut result = vec![true; self.sets.len()];
+        let mut result = vec![true; self.sets.rows()];
         self.dnf_query(dnf, &mut result);
         result
     }
@@ -387,7 +265,7 @@ impl TagSetSet {
 
 impl DnfQuery {
     pub fn iter<'a>(&'a self) -> TagSetSetIter<'a> {
-        TagSetSetIter(&self.tags, self.sets.rows())
+        TagSetSetIter(&self.tags, self.sets.iter())
     }
 
     pub fn dnf_query(&self, dnf: &DnfQuery) -> Vec<bool> {
@@ -397,7 +275,7 @@ impl DnfQuery {
             .iter()
             .map(|tag| lookup.get(tag).cloned())
             .collect::<Box<_>>();
-        let mut result = vec![true; self.sets.len()];
+        let mut result = vec![true; self.sets.rows()];
         dnf_query0(&self.sets, dnf, &translate, &mut result);
         result
     }
@@ -415,26 +293,26 @@ impl DnfQuery {
 fn dnf_query0(index: &Bitmap, dnf: &DnfQuery, translate: &[Option<u32>], result: &mut [bool]) {
     match index {
         Bitmap::Sparse(index) => {
-            let dnf = SparseBitmap(
+            let dnf = SparseBitmap::new(
                 dnf.sets
-                    .rows()
+                    .iter()
                     .filter_map(|row| {
                         row.map(|index| translate[index as usize])
                             .collect::<Option<IndexSet>>()
                     })
                     .collect(),
             );
-            for i in 0..index.len() {
-                result[i] = result[i] && {
-                    let set = &index.0[i];
-                    dnf.0.iter().any(move |query| query.is_subset(set))
+            for row in 0..index.rows() {
+                result[row] = result[row] && {
+                    let set = &index[row];
+                    dnf.iter().any(move |query| query.is_subset(set))
                 }
             }
         }
         Bitmap::Dense(index) => {
-            let dnf = DenseBitmap(
+            let dnf = DenseBitmap::new(
                 dnf.sets
-                    .rows()
+                    .iter()
                     .filter_map(|row| {
                         mask_from_bits_iter(
                             row.map(|index| translate[index as usize].unwrap_or(128)),
@@ -443,14 +321,18 @@ fn dnf_query0(index: &Bitmap, dnf: &DnfQuery, translate: &[Option<u32>], result:
                     })
                     .collect(),
             );
-            for i in 0..index.len() {
+            for i in 0..index.rows() {
                 result[i] = result[i] && {
-                    let set = &index.0[i];
-                    dnf.0.iter().any(move |query| is_subset(*query, *set))
+                    let set = &index[i];
+                    dnf.iter().any(move |query| is_subset(*query, *set))
                 }
             }
         }
     }
+}
+
+fn is_subset(a: IndexMask, b: IndexMask) -> bool {
+    a & b == a
 }
 
 pub struct TagSetSetIter<'a>(&'a [Tag], BitmapRowsIter<'a>);
@@ -480,7 +362,8 @@ pub struct TagSetSetBuilder {
 }
 
 impl TagSetSetBuilder {
-    pub fn tagsetset(self) -> TagSetSet {
+    /// Return the result as a [TagSetSet]
+    pub fn tag_set_set(self) -> TagSetSet {
         let tags = self.tags;
         let mut sets = vec![IndexSet::default(); self.sets.len()];
         for (set, index) in self.sets {
@@ -490,7 +373,8 @@ impl TagSetSetBuilder {
         TagSetSet { tags, sets }
     }
 
-    pub fn result(self) -> DnfQuery {
+    /// Return the result as a [DnfQuery]
+    pub fn dnf_query(self) -> DnfQuery {
         let mut tags = vec![None; self.tags.len()];
         for (tag, index) in self.tags {
             tags[index as usize] = Some(tag)
@@ -504,15 +388,19 @@ impl TagSetSetBuilder {
         DnfQuery { tags, sets }
     }
 
-    pub fn push_ref(&mut self, tags: &TagSet) -> anyhow::Result<u32> {
-        let indices = tags.iter().map(|tag| self.add_tag_ref(tag));
+    pub fn push(&mut self, tags: &TagSet) -> anyhow::Result<u32> {
+        let indices = tags.iter().map(|tag| self.add_tag(tag));
         let set = indices.collect::<anyhow::Result<IndexSet>>()?;
-        let offset = u32::try_from(self.sets.len())?;
-        self.sets.insert(set, offset);
-        Ok(offset)
+        Ok(if let Some(index) = self.sets.get(&set) {
+            *index
+        } else {
+            let index = u32::try_from(self.sets.len())?;
+            self.sets.insert(set, index);
+            index
+        })        
     }
 
-    fn add_tag_ref(&mut self, tag: &Tag) -> anyhow::Result<u32> {
+    fn add_tag(&mut self, tag: &Tag) -> anyhow::Result<u32> {
         Ok(if let Some(index) = self.tags.get(tag) {
             *index
         } else {
@@ -521,66 +409,6 @@ impl TagSetSetBuilder {
             index
         })
     }
-}
-
-fn delta_encode<T: WrappingSub<Output = T> + Copy>(data: &mut [T]) {
-    for i in (1..data.len()).rev() {
-        data[i] = data[i].wrapping_sub(&data[i - 1]);
-    }
-}
-
-fn delta_decode<T: WrappingAdd<Output = T> + Copy>(data: &mut [T]) {
-    for i in 1..data.len() {
-        data[i] = data[i].wrapping_add(&data[i - 1]);
-    }
-}
-
-fn is_subset(a: IndexMask, b: IndexMask) -> bool {
-    a & b == a
-}
-
-pub struct OneBitsIterator(IndexMask);
-
-impl Iterator for OneBitsIterator {
-    type Item = u32;
-    fn next(&mut self) -> Option<Self::Item> {
-        let offset = self.0.trailing_zeros();
-        if offset == 128 {
-            None
-        } else {
-            self.0 &= !(1u128 << offset);
-            Some(offset)
-        }
-    }
-}
-
-/// Given an interator of bits, creates a 128 bit bitmask.
-/// If any of the bits is too high, returns an error.
-fn mask_from_bits_iter(iterator: impl IntoIterator<Item = u32>) -> anyhow::Result<IndexMask> {
-    let mut mask: IndexMask = 0;
-    let mut iter = iterator.into_iter();
-    while let Some(bit) = iter.next() {
-        anyhow::ensure!(bit < 128);
-        mask |= 1u128 << bit;
-    }
-    Ok(mask)
-}
-
-/// Given an iterator of bits, creates either a 128 bit bitmask, or a set of bits.
-fn to_mask_or_set(iterator: impl IntoIterator<Item = u32>) -> result::Result<IndexMask, IndexSet> {
-    let mut mask: IndexMask = 0;
-    let mut iter = iterator.into_iter();
-    while let Some(bit) = iter.next() {
-        if bit < 128 {
-            mask |= 1u128 << bit;
-        } else {
-            let mut res = OneBitsIterator(mask).collect::<FnvHashSet<_>>();
-            res.insert(bit);
-            res.extend(iter);
-            return Err(res.into_iter().collect());
-        }
-    }
-    Ok(mask)
 }
 
 fn tag_set(tags: &[&str]) -> TagSet {
@@ -594,10 +422,10 @@ fn main() -> anyhow::Result<()> {
     let b = tag_set(&["a", "x", "y"]);
     let c = tag_set(&["a", "b", "y"]);
     let mut builder = TagSetSetBuilder::default();
-    builder.push_ref(&a)?;
-    builder.push_ref(&b)?;
-    builder.push_ref(&c)?;
-    let t = builder.result();
+    builder.push(&a)?;
+    builder.push(&b)?;
+    builder.push(&c)?;
+    let t = builder.dnf_query();
     println!("{:?}", t);
     for x in t.iter() {
         let x = x.map(|t| t.to_string()).collect::<Vec<_>>();
@@ -609,17 +437,49 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use libipld::codec::Codec;
+    use libipld_cbor::DagCborCodec;
     use quickcheck::Arbitrary;
+
+    // create a test tag set - each alphanumeric char will be converted to an individual tag.
+    fn ts(tags: &str) -> TagSet {
+        tags.chars()
+            .filter(|c| char::is_alphanumeric(*c))
+            .map(|x| Tag(x.to_string().into_bytes().into()))
+            .collect()
+    }
+
+    // create a sequence of tag sets
+    fn tss(tags: &str) -> Vec<TagSet> {
+        let parts = tags.split(",");
+        parts.map(ts).collect()
+    }
 
     fn tag_set_set(tags: &[&[&str]]) -> DnfQuery {
         let mut builder = TagSetSetBuilder::default();
         for tags in tags.iter().map(|x| tag_set(x)) {
-            builder.push_ref(&tags).unwrap();
+            builder.push(&tags).unwrap();
         }
-        builder.result()
+        builder.dnf_query()
     }
 
     use super::*;
+
+    #[test]
+    fn tag_index_from_elements() -> anyhow::Result<()> {
+        let index = TagIndex::new(&[
+            tag_set(&["a"]),
+            tag_set(&["a", "b"]),
+            tag_set(&["b", "c"]),
+            tag_set(&["a"]),
+        ])?;
+        let query = DnfQuery::new(&[])?;
+        let mut mask = [true; 4];
+        query.set_matching(&index, &mut mask);
+        println!("{:?}", query);
+        println!("{:?}", index);
+        println!("{:?}", mask);
+        Ok(())
+    }
 
     #[test]
     fn dnf_query() {
@@ -662,23 +522,6 @@ mod tests {
     }
 
     #[quickcheck]
-    fn bits_iter_roundtrip(value: IndexMask) -> bool {
-        let iter = OneBitsIterator(value);
-        let value1 = mask_from_bits_iter(iter).unwrap();
-        value == value1
-    }
-
-    #[quickcheck]
-    fn delta_decode_roundtrip(mut values: Vec<u8>) -> bool {
-        values.sort();
-        values.dedup();
-        let reference = values.clone();
-        delta_encode(&mut values);
-        delta_decode::<u8>(&mut values);
-        values == reference
-    }
-
-    #[quickcheck]
     fn tag_set_set_cbor_roundtrip(value: DnfQuery) -> bool {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
@@ -703,7 +546,7 @@ mod tests {
             sets.sort();
             sets.dedup();
             Self {
-                sets: DenseBitmap(sets.into()).into(),
+                sets: DenseBitmap::new(sets.into()).into(),
                 tags: tags.into(),
             }
         }
