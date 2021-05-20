@@ -1,6 +1,10 @@
 use fmt::{Display, Write};
 use fnv::{FnvHashMap, FnvHashSet};
-use libipld::DagCbor;
+use libipld::{
+    codec::{Decode, Encode},
+    DagCbor,
+};
+use libipld_cbor::DagCborCodec;
 use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap};
 mod bitmap;
 use bitmap::*;
@@ -60,10 +64,25 @@ pub struct DnfQuery {
 ///     b1000,
 ///   ]
 /// }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TagSetSet {
     tags: FnvHashMap<Tag, u32>,
     sets: Bitmap,
+}
+
+impl Encode<DagCborCodec> for TagSetSet {
+    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+        DnfQuery::from(self.clone()).encode(c, w)
+    }
+}
+
+impl Decode<DagCborCodec> for TagSetSet {
+    fn decode<R: std::io::Read + std::io::Seek>(
+        c: DagCborCodec,
+        r: &mut R,
+    ) -> anyhow::Result<Self> {
+        DnfQuery::decode(c, r).map(Into::into)
+    }
 }
 
 /// A tag index, using a [TagSetSet] to encode the distinct tag sets, and a vector
@@ -94,7 +113,7 @@ pub struct TagSetSet {
 ///   ],
 /// }
 ///```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, DagCbor)]
 pub struct TagIndex {
     /// efficiently encoded distinct tags
     tags: TagSetSet,
@@ -125,7 +144,6 @@ impl From<serde_bytes::ByteBuf> for Tag {
 }
 
 impl DnfQuery {
-
     pub fn new<'a>(sets: impl IntoIterator<Item = &'a TagSet>) -> anyhow::Result<Self> {
         let mut builder = TagSetSetBuilder::default();
         for set in sets {
@@ -267,26 +285,6 @@ impl DnfQuery {
     pub fn iter<'a>(&'a self) -> TagSetSetIter<'a> {
         TagSetSetIter(&self.tags, self.sets.iter())
     }
-
-    pub fn dnf_query(&self, dnf: &DnfQuery) -> Vec<bool> {
-        let lookup = self.index_lut();
-        let translate = dnf
-            .tags
-            .iter()
-            .map(|tag| lookup.get(tag).cloned())
-            .collect::<Box<_>>();
-        let mut result = vec![true; self.sets.rows()];
-        dnf_query0(&self.sets, dnf, &translate, &mut result);
-        result
-    }
-
-    fn index_lut(&self) -> FnvHashMap<&Tag, u32> {
-        self.tags
-            .iter()
-            .enumerate()
-            .map(|(index, tag)| (tag, u32::try_from(index).unwrap()))
-            .collect()
-    }
 }
 
 /// performs a dnf query on an index, given a lookup table to translate from the dnf query to the index domain
@@ -397,7 +395,7 @@ impl TagSetSetBuilder {
             let index = u32::try_from(self.sets.len())?;
             self.sets.insert(set, index);
             index
-        })        
+        })
     }
 
     fn add_tag(&mut self, tag: &Tag) -> anyhow::Result<u32> {
@@ -448,81 +446,67 @@ mod tests {
             .collect()
     }
 
-    // create a sequence of tag sets
+    // create a sequence of tag sets, separated by ,
     fn tss(tags: &str) -> Vec<TagSet> {
-        let parts = tags.split(",");
-        parts.map(ts).collect()
+        tags.split(",").map(ts).collect()
     }
 
-    fn tag_set_set(tags: &[&[&str]]) -> DnfQuery {
-        let mut builder = TagSetSetBuilder::default();
-        for tags in tags.iter().map(|x| tag_set(x)) {
-            builder.push(&tags).unwrap();
-        }
-        builder.dnf_query()
+    // create a dnf query, separated by |
+    fn dnf(tags: &str) -> DnfQuery {
+        let parts = tags.split("|").map(ts).collect::<Vec<_>>();
+        DnfQuery::new(&parts).unwrap()
+    }
+
+    // create a dnf query, separated by |
+    fn ti(tags: &str) -> TagIndex {
+        TagIndex::new(&tss(tags)).unwrap()
     }
 
     use super::*;
 
+    fn matches(index: &str, query: &str) -> String {
+        let index = ti(index);
+        let query = dnf(query);
+        let mut matches = vec![true; index.len()];
+        query.set_matching(&index, &mut matches);
+        matches.iter().map(|x| if *x { '1' } else { '0' }).collect()
+    }
+
     #[test]
-    fn tag_index_from_elements() -> anyhow::Result<()> {
-        let index = TagIndex::new(&[
-            tag_set(&["a"]),
-            tag_set(&["a", "b"]),
-            tag_set(&["b", "c"]),
-            tag_set(&["a"]),
-        ])?;
-        let query = DnfQuery::new(&[])?;
-        let mut mask = [true; 4];
-        query.set_matching(&index, &mut mask);
-        println!("{:?}", query);
-        println!("{:?}", index);
-        println!("{:?}", mask);
+    fn tag_index_query_tests() -> anyhow::Result<()> {
+        assert_eq!(&matches(" a,ab,bc, a", "ab"), "0100");
+        assert_eq!(&matches(" a, a, a, a", "ab"), "0000");
+        assert_eq!(&matches(" a, a, a,ab", "ab|c|d"), "0001");
         Ok(())
     }
 
     #[test]
     fn dnf_query() {
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
-            let dnf = tag_set_set(&[&["a"]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[true, true, false]);
-        }
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
-            let dnf = tag_set_set(&[&["a", "b"]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[true, false, false]);
-        }
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
-            let dnf = tag_set_set(&[&["a", "x"]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[false, false, false]);
-        }
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
-            let dnf = tag_set_set(&[&[]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[true, true, true]);
-        }
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["a", "c"], &["b", "c"]]);
-            let dnf = tag_set_set(&[&["c"]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[false, true, true]);
-        }
-        {
-            let tags = tag_set_set(&[&["a", "b"], &["b", "c"], &["c", "d"]]);
-            let dnf = tag_set_set(&[&["a"], &["d"]]);
-            let indexes = tags.dnf_query(&dnf);
-            assert_eq!(&indexes, &[true, false, true]);
-        }
+        // sequence containing empty sets, matches everything
+        assert_eq!(&matches("ab,ac,bc", " ||"), "111");
+        assert_eq!(&matches("ab,ac,bc", "  a"), "110");
+        assert_eq!(&matches("ab,ac,bc", " ab"), "100");
+        assert_eq!(&matches("ab,ac,bc", " ax"), "000");
+        assert_eq!(&matches("ab,ac,bc", "  c"), "011");
+        assert_eq!(&matches("ab,bc,cd", "a|d"), "101");
     }
 
     #[quickcheck]
-    fn tag_set_set_cbor_roundtrip(value: DnfQuery) -> bool {
+    fn dnf_query_cbor_roundtrip(value: DnfQuery) -> bool {
+        let bytes = DagCborCodec.encode(&value).unwrap();
+        let value1 = DagCborCodec.decode(&bytes).unwrap();
+        value == value1
+    }
+
+    #[quickcheck]
+    fn tag_set_set_cbor_roundtrip(value: TagSetSet) -> bool {
+        let bytes = DagCborCodec.encode(&value).unwrap();
+        let value1 = DagCborCodec.decode(&bytes).unwrap();
+        value == value1
+    }
+
+    #[quickcheck]
+    fn tag_index_cbor_roundtrip(value: TagIndex) -> bool {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
@@ -549,6 +533,20 @@ mod tests {
                 sets: DenseBitmap::new(sets.into()).into(),
                 tags: tags.into(),
             }
+        }
+    }
+
+    impl Arbitrary for TagSetSet {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let q: DnfQuery = Arbitrary::arbitrary(g);
+            q.into()
+        }
+    }
+
+    impl Arbitrary for TagIndex {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let tags: Vec<TagSet> = Arbitrary::arbitrary(g);
+            TagIndex::new(&tags).unwrap()
         }
     }
 
