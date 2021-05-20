@@ -17,7 +17,7 @@ extern crate quickcheck;
 extern crate quickcheck_macros;
 
 /// our toy tag
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
 pub struct Tag(Box<[u8]>);
 
 /// a set of tags
@@ -132,6 +132,16 @@ impl fmt::Display for Tag {
     }
 }
 
+impl fmt::Debug for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Ok(text) = std::str::from_utf8(&self.0) {
+            write!(f, "{}", text)
+        } else {
+            write!(f, "{}", hex::encode(&self.0))
+        }
+    }
+}
+
 impl From<Tag> for serde_bytes::ByteBuf {
     fn from(value: Tag) -> Self {
         Self::from(value.0)
@@ -218,11 +228,24 @@ impl TagIndex {
 
     pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
         let lut = self.tags.tags().collect::<Vec<_>>();
-        self.events.iter().map(move |offset| lut[*offset as usize].clone())
+        self.events
+            .iter()
+            .map(move |offset| lut[*offset as usize].clone())
     }
 
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+}
+
+impl Display for TagIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(
+                self.tags()
+                    .map(|ts| ts.into_iter().collect::<DebugUsingDisplay<_>>()),
+            )
+            .finish()
     }
 }
 
@@ -291,9 +314,9 @@ impl TagSetSet {
     /// get back the tag sets the tag index was created from, in order
     pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
         let lut = self.lut();
-        self.sets.iter().map(
-            move |row| row.map(|i| lut[i as usize].clone()).collect::<TagSet>()
-        )
+        self.sets
+            .iter()
+            .map(move |row| row.map(|i| lut[i as usize].clone()).collect::<TagSet>())
     }
 }
 
@@ -302,9 +325,12 @@ impl DnfQuery {
         TagSetSetIter(&self.tags, self.sets.iter())
     }
 
-    /// get back the tag sets the dnf query 
+    /// get back the tag sets the dnf query
     pub fn tags(&self) -> impl Iterator<Item = TagSet> + '_ {
-        self.sets.iter().map(move |rows| rows.map(|index| self.tags[index as usize].clone()).collect())
+        self.sets.iter().map(move |rows| {
+            rows.map(|index| self.tags[index as usize].clone())
+                .collect()
+        })
     }
 }
 
@@ -543,7 +569,11 @@ mod tests {
         for (tags, matching) in index.tags().zip(bits2.iter_mut()) {
             *matching = query_tags.iter().any(|q| q.is_subset(&tags))
         }
-        println!("{:?}", bits1);
+        let bt = bits1
+            .iter()
+            .map(|x| if *x { '1' } else { '0' })
+            .collect::<String>();
+        println!("{} {} {}", index, query, bt);
         bits1 == bits2
     }
 
