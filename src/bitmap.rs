@@ -30,6 +30,17 @@ impl Default for Bitmap {
 }
 
 impl Bitmap {
+    pub fn new(items: impl IntoIterator<Item = impl IntoIterator<Item = u32>>) -> Self {
+        Self::from_iter(items.into_iter())
+    }
+
+    pub fn is_dense(&self) -> bool {
+        match self {
+            Self::Dense(_) => true,
+            Self::Sparse(_) => false,
+        }
+    }
+
     pub fn rows(&self) -> usize {
         match self {
             Self::Dense(x) => x.rows(),
@@ -223,11 +234,6 @@ pub(crate) enum BitmapRowsIter<'a> {
     Sparse(slice::Iter<'a, IndexSet>),
 }
 
-pub(crate) enum BitmapRowsIntoIter {
-    Dense(u64),
-    Sparse(u64),
-}
-
 impl<'a> Iterator for BitmapRowsIter<'a> {
     type Item = BitmapRowIter<'a>;
 
@@ -314,6 +320,27 @@ fn to_mask_or_set(iterator: impl IntoIterator<Item = u32>) -> result::Result<Ind
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libipld::codec::Codec;
+
+    #[test]
+    fn dense_1() {
+        let bitmap = Bitmap::new(vec![vec![1, 2, 4, 8, 127]; 7]);
+        assert!(bitmap.is_dense());
+        assert_eq!(bitmap.rows(), 7);
+        for i in 0..bitmap.rows() {
+            assert_eq!(bitmap.row(i).collect::<Vec<_>>(), vec![1, 2, 4, 8, 127]);
+        }
+    }
+
+    #[test]
+    fn sparse_1() {
+        let bitmap = Bitmap::new(vec![vec![1, 2, 4, 8, 128]; 9]);
+        assert!(!bitmap.is_dense());
+        assert_eq!(bitmap.rows(), 9);
+        for i in 0..bitmap.rows() {
+            assert_eq!(bitmap.row(i).collect::<Vec<_>>(), vec![1, 2, 4, 8, 128]);
+        }
+    }
 
     #[quickcheck]
     fn bits_iter_roundtrip(value: IndexMask) -> bool {
@@ -330,5 +357,12 @@ mod tests {
         delta_encode(&mut values);
         delta_decode::<u8>(&mut values);
         values == reference
+    }
+
+    #[quickcheck]
+    fn dnf_query_cbor_roundtrip(value: Bitmap) -> bool {
+        let bytes = DagCborCodec.encode(&value).unwrap();
+        let value1 = DagCborCodec.decode(&bytes).unwrap();
+        value == value1
     }
 }

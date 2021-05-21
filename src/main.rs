@@ -5,10 +5,12 @@ use libipld::{
     DagCbor,
 };
 use libipld_cbor::DagCborCodec;
-use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap, ops::Index, usize};
+use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap, usize};
 mod bitmap;
 mod util;
 use bitmap::*;
+#[cfg(test)]
+mod arb;
 
 #[cfg(test)]
 extern crate quickcheck;
@@ -294,6 +296,14 @@ impl From<TagSetSet> for DnfQuery {
 }
 
 impl TagSetSet {
+    pub fn new(data: &[TagSet]) -> anyhow::Result<Self> {
+        let mut builder = TagSetSetBuilder::default();
+        for set in data {
+            builder.push(set)?;
+        }
+        Ok(builder.tag_set_set())
+    }
+
     pub fn dnf_query(&self, dnf: &DnfQuery, result: &mut [bool]) {
         let translate = dnf
             .tags
@@ -407,6 +417,10 @@ pub struct TagSetSetBuilder {
 }
 
 impl TagSetSetBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Return the result as a [TagSetSet]
     pub fn tag_set_set(self) -> TagSetSet {
         let tags = self.tags;
@@ -483,7 +497,6 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use libipld::codec::Codec;
     use libipld_cbor::DagCborCodec;
-    use quickcheck::Arbitrary;
 
     // create a test tag set - each alphanumeric char will be converted to an individual tag.
     fn ts(tags: &str) -> TagSet {
@@ -539,6 +552,24 @@ mod tests {
     }
 
     #[quickcheck]
+    fn set_matching(index: TagIndex, query: DnfQuery) -> bool {
+        let mut bits1 = vec![true; index.len()];
+        let mut bits2 = vec![false; index.len()];
+        query.set_matching(&index, &mut bits1);
+
+        let query_tags = query.tags().collect::<Vec<_>>();
+        for (tags, matching) in index.tags().zip(bits2.iter_mut()) {
+            *matching = query_tags.iter().any(|q| q.is_subset(&tags))
+        }
+        let bt = bits1
+            .iter()
+            .map(|x| if *x { '1' } else { '0' })
+            .collect::<String>();
+        println!("{} {} {}", index, query, bt);
+        bits1 == bits2
+    }
+
+    #[quickcheck]
     fn dnf_query_cbor_roundtrip(value: DnfQuery) -> bool {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
@@ -558,62 +589,4 @@ mod tests {
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
     }
-
-    #[quickcheck]
-    fn set_matching(index: TagIndex, query: DnfQuery) -> bool {
-        let mut bits1 = vec![true; index.len()];
-        let mut bits2 = vec![false; index.len()];
-        query.set_matching(&index, &mut bits1);
-
-        let query_tags = query.tags().collect::<Vec<_>>();
-        for (tags, matching) in index.tags().zip(bits2.iter_mut()) {
-            *matching = query_tags.iter().any(|q| q.is_subset(&tags))
-        }
-        let bt = bits1
-            .iter()
-            .map(|x| if *x { '1' } else { '0' })
-            .collect::<String>();
-        println!("{} {} {}", index, query, bt);
-        bits1 == bits2
-    }
-
-    impl Arbitrary for Tag {
-        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-            let tag = g.choose(TAG_NAMES).unwrap();
-            Tag(tag.as_bytes().to_vec().into())
-        }
-    }
-
-    impl Arbitrary for DnfQuery {
-        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-            let tags: FnvHashSet<Tag> = Arbitrary::arbitrary(g);
-            let mut sets: Vec<IndexMask> = Arbitrary::arbitrary(g);
-            let mut tags = tags.into_iter().collect::<Vec<_>>();
-            tags.truncate(128);
-            let mask = !(IndexMask::max_value() << tags.len());
-            sets.iter_mut().for_each(|set| *set &= mask);
-            sets.sort();
-            sets.dedup();
-            Self {
-                sets: DenseBitmap::new(sets.into()).into(),
-                tags: tags.into(),
-            }
-        }
-    }
-
-    impl Arbitrary for TagSetSet {
-        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-            let q: DnfQuery = Arbitrary::arbitrary(g);
-            q.into()
-        }
-    }
-
-    impl Arbitrary for TagIndex {
-        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-            let tags: Vec<TagSet> = Arbitrary::arbitrary(g);
-            TagIndex::new(&tags).unwrap()
-        }
-    }
-
-    const TAG_NAMES: &[&'static str] = &["a", "b", "c", "d", "e", "f"];
 }
