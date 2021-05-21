@@ -1,4 +1,3 @@
-
 #[cfg(test)]
 extern crate quickcheck;
 #[cfg(test)]
@@ -8,10 +7,8 @@ extern crate quickcheck_macros;
 mod tag_index;
 use tag_index::*;
 
-fn tag_set(tags: &[&str]) -> TagSet {
-    tags.iter()
-        .map(|x| Tag(x.to_string().into_bytes().into()))
-        .collect()
+fn tag_set(tags: &[&str]) -> TagSet<TestTag> {
+    tags.iter().map(|x| TestTag(x.to_string())).collect()
 }
 
 fn main() -> anyhow::Result<()> {

@@ -1,13 +1,12 @@
+use super::util::IterExt;
 use core::slice;
 use fnv::FnvHashSet;
 use libipld::{
     cbor::DagCborCodec,
     codec::{Decode, Encode},
 };
-use num_traits::{WrappingAdd, WrappingSub};
 use std::{io::SeekFrom, iter::FromIterator, ops::Index, result, usize};
 use vec_collections::VecSet;
-use super::util::IterExt;
 
 // set for the sparse case
 pub(crate) type IndexSet = VecSet<[u32; 4]>;
@@ -179,7 +178,7 @@ impl Encode<DagCborCodec> for Bitmap {
     fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
         match self {
             Self::Dense(x) => x.encode(c, w),
-            Self::Sparse(x) => x.encode(c, w)
+            Self::Sparse(x) => x.encode(c, w),
         }
     }
 }
@@ -285,15 +284,15 @@ impl<'a> Iterator for BitmapRowIter<'a> {
     }
 }
 
-fn delta_encode<T: WrappingSub<Output = T> + Copy>(data: &mut [T]) {
+fn delta_encode(data: &mut [u32]) {
     for i in (1..data.len()).rev() {
-        data[i] = data[i].wrapping_sub(&data[i - 1]);
+        data[i] = data[i].wrapping_sub(data[i - 1]);
     }
 }
 
-fn delta_decode<T: WrappingAdd<Output = T> + Copy>(data: &mut [T]) {
+fn delta_decode(data: &mut [u32]) {
     for i in 1..data.len() {
-        data[i] = data[i].wrapping_add(&data[i - 1]);
+        data[i] = data[i].wrapping_add(data[i - 1]);
     }
 }
 
@@ -346,7 +345,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use libipld::{codec::{Codec, assert_roundtrip}, ipld};
+    use libipld::{
+        codec::{assert_roundtrip, Codec},
+        ipld,
+    };
 
     #[test]
     fn dense_1() {
@@ -403,12 +405,12 @@ mod tests {
     }
 
     #[quickcheck]
-    fn delta_decode_roundtrip(mut values: Vec<u8>) -> bool {
+    fn delta_decode_roundtrip(mut values: Vec<u32>) -> bool {
         values.sort();
         values.dedup();
         let reference = values.clone();
         delta_encode(&mut values);
-        delta_decode::<u8>(&mut values);
+        delta_decode(&mut values);
         values == reference
     }
 
