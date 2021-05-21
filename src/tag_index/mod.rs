@@ -509,7 +509,7 @@ mod tests {
     use rand::prelude::*;
     use rand::SeedableRng;
     use rand_chacha::ChaChaRng;
-    use std::{any, hash::Hasher, time::Instant};
+    use std::{any, hash::Hasher, sync::Arc, time::Instant};
 
     use fnv::FnvHasher;
     use libipld::DagCbor;
@@ -677,7 +677,7 @@ mod tests {
         seed: u64,
         n_events: usize,
         n_terms: usize,
-    ) -> anyhow::Result<(TagIndex<String>, DnfQuery<String>)> {
+    ) -> anyhow::Result<(TagIndex<Arc<String>>, DnfQuery<Arc<String>>)> {
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let mut id = || -> String { hex::encode(rng.gen::<u64>().to_be_bytes()) };
         let mut create_concrete = |prefix: &str, n: usize| -> Vec<String> {
@@ -692,14 +692,24 @@ mod tests {
             .filter_map(|_| {
                 let (common, rare) = tags.choose(&mut rng).unwrap().clone();
                 let rare = rare.choose(&mut rng)?.clone();
-                Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+                Some(
+                    vec![common, rare]
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect::<TagSet<Arc<String>>>(),
+                )
             })
             .collect::<Vec<_>>();
         let query = (0..n_terms)
             .filter_map(|_| {
                 let (common, rare) = tags.choose(&mut rng).unwrap().clone();
                 let rare = rare.choose(&mut rng)?.clone();
-                Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+                Some(
+                    vec![common, rare]
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect::<TagSet<Arc<String>>>(),
+                )
             })
             .collect::<Vec<_>>();
         let index = TagIndex::new(&events)?;
