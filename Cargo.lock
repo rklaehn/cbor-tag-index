@@ -148,6 +148,8 @@ dependencies = [
  "libipld-cbor",
  "quickcheck",
  "quickcheck_macros",
+ "rand",
+ "rand_chacha",
  "serde_json",
  "vec-collections",
 ]

@@ -7,8 +7,12 @@ extern crate quickcheck_macros;
 mod tag_index;
 use tag_index::*;
 
-fn tag_set(tags: &[&str]) -> TagSet<TestTag> {
-    tags.iter().map(|x| TestTag(x.to_string())).collect()
+fn tag_set(tags: &[&'static str]) -> TagSet<&'static str> {
+    let mut res = TagSet::default();
+    for tag in tags {
+        res.insert(*tag);
+    }
+    res
 }
 
 fn main() -> anyhow::Result<()> {

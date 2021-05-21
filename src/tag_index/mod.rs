@@ -3,10 +3,9 @@ use fnv::FnvHashMap;
 use libipld::{
     cbor::DagCbor,
     codec::{Decode, Encode},
-    DagCbor,
 };
 use libipld_cbor::DagCborCodec;
-use std::{collections::BTreeSet, hash::Hash};
+use std::hash::Hash;
 use std::{convert::TryFrom, fmt, iter::FromIterator, mem::swap, usize};
 use vec_collections::VecSet;
 mod bitmap;
@@ -17,11 +16,6 @@ mod arb;
 pub trait Tag: PartialEq + Eq + Hash + Ord + Clone + 'static {}
 
 impl<T: PartialEq + Eq + Hash + Ord + Clone + 'static> Tag for T {}
-
-/// our toy tag
-#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
-#[ipld(repr = "value")]
-pub struct TestTag(pub String);
 
 /// a set of tags
 pub type TagSet<T> = VecSet<[T; 4]>;
@@ -160,18 +154,6 @@ impl<T: Tag + DagCbor> Decode<DagCborCodec> for TagIndex<T> {
     ) -> anyhow::Result<Self> {
         let (tags, events) = <(TagSetSet<T>, Vec<u32>)>::decode(c, r)?;
         Ok(Self { tags, events })
-    }
-}
-
-impl fmt::Display for TestTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl fmt::Debug for TestTag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -504,11 +486,45 @@ impl<T: Tag> DnfQueryBuilder<T> {
 
 #[cfg(test)]
 mod tests {
+    use rand_chacha::ChaChaRng;
+    use rand::SeedableRng;
+    use rand::prelude::*;
+    use std::{any, hash::Hasher};    
+
+    use fnv::FnvHasher;
     use libipld::{
         codec::{assert_roundtrip, Codec},
         ipld,
     };
+    use libipld::DagCbor;
     use libipld_cbor::DagCborCodec;
+    use quickcheck::Arbitrary;
+
+    /// our toy tag
+    #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
+    #[ipld(repr = "value")]
+    pub struct TestTag(pub String);
+
+    impl fmt::Display for TestTag {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl fmt::Debug for TestTag {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl Arbitrary for TestTag {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            let tag = g.choose(TAG_NAMES).unwrap();
+            TestTag((*tag).to_owned())
+        }
+    }
+
+    const TAG_NAMES: &[&'static str] = &["a", "b", "c", "d", "e", "f"];
 
     // create a test tag set - each alphanumeric char will be converted to an individual tag.
     fn ts(tags: &str) -> TagSet<TestTag> {
@@ -611,5 +627,40 @@ mod tests {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
+    }
+
+    #[test]
+    fn large_example_bench_1() -> anyhow::Result<()> {
+        let example = create_example(0, 10000, 3)?;
+        println!("{:?}", example);
+        Ok(())
+    }
+
+    fn create_example(seed: u64, n_events: usize, n_terms: usize) -> anyhow::Result<(TagIndex<String>, DnfQuery<String>)> {
+        let mut rng = ChaChaRng::seed_from_u64(seed);
+        let mut id = || -> String {
+            hex::encode(rng.gen::<u64>().to_be_bytes())
+        };
+        let mut create_concrete = |prefix: &str, n: usize| -> Vec<String> {
+            (0..n).map(|i| format!("{}-{}", prefix, id())).collect()
+        };
+        let common: Vec<(&str, usize)> = vec![("article", 30), ("sku", 40), ("location", 50)];
+        let tags: Vec<(String, Vec<String>)> = common
+            .into_iter()
+            .map(|(prefix, n)| (prefix.to_owned(), create_concrete(prefix, n)))
+            .collect();
+        let events = (0..n_events).filter_map(|_| {
+            let (common, rare) = tags.choose(&mut rng).unwrap().clone();
+            let rare = rare.choose(&mut rng)?.clone();
+            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+        }).collect::<Vec<_>>();
+        let query = (0..n_terms).filter_map(|_| {
+            let (common, rare) = tags.choose(&mut rng).unwrap().clone();
+            let rare = rare.choose(&mut rng)?.clone();
+            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+        }).collect::<Vec<_>>();
+        let index =TagIndex::new(&events)?;
+        let query = DnfQuery::new(&query)?;
+        Ok((index, query))
     }
 }

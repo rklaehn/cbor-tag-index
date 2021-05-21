@@ -1,6 +1,6 @@
 use super::*;
 use quickcheck::Arbitrary;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone)]
 struct TagSetHelper<T>(TagSet<T>);
@@ -16,13 +16,6 @@ impl Arbitrary for Bitmap {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
         let items: Vec<HashSet<u32>> = Arbitrary::arbitrary(g);
         Bitmap::new(items)
-    }
-}
-
-impl Arbitrary for TestTag {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        let tag = g.choose(TAG_NAMES).unwrap();
-        TestTag((*tag).to_owned())
     }
 }
 
@@ -51,5 +44,3 @@ impl<T: Tag + Arbitrary> Arbitrary for TagIndex<T> {
         TagIndex::new(&tags).unwrap()
     }
 }
-
-const TAG_NAMES: &[&'static str] = &["a", "b", "c", "d", "e", "f"];
