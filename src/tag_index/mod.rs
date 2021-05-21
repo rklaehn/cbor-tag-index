@@ -167,6 +167,13 @@ impl<T: Tag> DnfQuery<T> {
         Ok(builder.dnf_query())
     }
 
+    #[cfg(test)]
+    pub fn matching(&self, index: &TagIndex<T>) -> Vec<bool> {
+        let mut matching = vec![true; index.len()];
+        self.set_matching(index, &mut matching);
+        matching
+    }
+
     /// given a bitmap of matches, corresponding to the events in the index,
     /// set those bytes to false that do not match.
     pub fn set_matching(&self, index: &TagIndex<T>, matches: &mut [bool]) {
@@ -189,9 +196,18 @@ impl<T: Tag> DnfQuery<T> {
 
 impl<T: Tag + Display> Display for DnfQuery<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_set()
-            .entries(self.iter().map(|x| x.collect::<DebugUsingDisplay<_>>()))
-            .finish()
+        let term_to_string = |term: TagSet<T>| -> String {
+            term.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let res = self
+            .terms()
+            .map(|term| term_to_string(term))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        f.write_str(&res)
     }
 }
 
@@ -342,11 +358,15 @@ impl<T: Tag> DnfQuery<T> {
     }
 
     /// get back the tag sets the dnf query
-    pub fn tags(&self) -> impl Iterator<Item = TagSet<T>> + '_ {
+    pub fn terms(&self) -> impl Iterator<Item = TagSet<T>> + '_ {
         self.sets.iter().map(move |rows| {
             rows.map(|index| self.tags[index as usize].clone())
                 .collect()
         })
+    }
+
+    pub fn term_count(&self) -> usize {
+        self.sets.rows()
     }
 }
 
@@ -486,17 +506,17 @@ impl<T: Tag> DnfQueryBuilder<T> {
 
 #[cfg(test)]
 mod tests {
-    use rand_chacha::ChaChaRng;
-    use rand::SeedableRng;
     use rand::prelude::*;
-    use std::{any, hash::Hasher};    
+    use rand::SeedableRng;
+    use rand_chacha::ChaChaRng;
+    use std::{any, hash::Hasher, time::Instant};
 
     use fnv::FnvHasher;
+    use libipld::DagCbor;
     use libipld::{
         codec::{assert_roundtrip, Codec},
         ipld,
     };
-    use libipld::DagCbor;
     use libipld_cbor::DagCborCodec;
     use quickcheck::Arbitrary;
 
@@ -585,7 +605,7 @@ mod tests {
         let mut bits2 = vec![false; index.len()];
         query.set_matching(&index, &mut bits1);
 
-        let query_tags = query.tags().collect::<Vec<_>>();
+        let query_tags = query.terms().collect::<Vec<_>>();
         for (tags, matching) in index.tags().zip(bits2.iter_mut()) {
             *matching = query_tags.iter().any(|q| q.is_subset(&tags))
         }
@@ -631,16 +651,35 @@ mod tests {
 
     #[test]
     fn large_example_bench_1() -> anyhow::Result<()> {
-        let example = create_example(0, 10000, 3)?;
-        println!("{:?}", example);
+        let (index, query) = create_example(0, 10000, 3)?;
+        println!("events=");
+        for tags in index.tags() {
+            println!("{:?}", tags);
+        }
+        println!("");
+        println!("query={}", query);
+        println!("");
+        let t0 = Instant::now();
+        let r = query.matching(&index);
+        let dt = t0.elapsed();
+        let matching = r.iter().filter(|x| **x).count();
+        println!(
+            "n={}\nterms={}\nmatching={}\nduration={}us",
+            index.len(),
+            query.term_count(),
+            matching,
+            dt.as_micros()
+        );
         Ok(())
     }
 
-    fn create_example(seed: u64, n_events: usize, n_terms: usize) -> anyhow::Result<(TagIndex<String>, DnfQuery<String>)> {
+    fn create_example(
+        seed: u64,
+        n_events: usize,
+        n_terms: usize,
+    ) -> anyhow::Result<(TagIndex<String>, DnfQuery<String>)> {
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let mut id = || -> String {
-            hex::encode(rng.gen::<u64>().to_be_bytes())
-        };
+        let mut id = || -> String { hex::encode(rng.gen::<u64>().to_be_bytes()) };
         let mut create_concrete = |prefix: &str, n: usize| -> Vec<String> {
             (0..n).map(|i| format!("{}-{}", prefix, id())).collect()
         };
@@ -649,17 +688,21 @@ mod tests {
             .into_iter()
             .map(|(prefix, n)| (prefix.to_owned(), create_concrete(prefix, n)))
             .collect();
-        let events = (0..n_events).filter_map(|_| {
-            let (common, rare) = tags.choose(&mut rng).unwrap().clone();
-            let rare = rare.choose(&mut rng)?.clone();
-            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
-        }).collect::<Vec<_>>();
-        let query = (0..n_terms).filter_map(|_| {
-            let (common, rare) = tags.choose(&mut rng).unwrap().clone();
-            let rare = rare.choose(&mut rng)?.clone();
-            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
-        }).collect::<Vec<_>>();
-        let index =TagIndex::new(&events)?;
+        let events = (0..n_events)
+            .filter_map(|_| {
+                let (common, rare) = tags.choose(&mut rng).unwrap().clone();
+                let rare = rare.choose(&mut rng)?.clone();
+                Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+            })
+            .collect::<Vec<_>>();
+        let query = (0..n_terms)
+            .filter_map(|_| {
+                let (common, rare) = tags.choose(&mut rng).unwrap().clone();
+                let rare = rare.choose(&mut rng)?.clone();
+                Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+            })
+            .collect::<Vec<_>>();
+        let index = TagIndex::new(&events)?;
         let query = DnfQuery::new(&query)?;
         Ok((index, query))
     }
