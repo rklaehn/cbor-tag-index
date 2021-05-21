@@ -3,13 +3,11 @@ use fnv::FnvHashSet;
 use libipld::{
     cbor::DagCborCodec,
     codec::{Decode, Encode},
-    DagCbor,
 };
 use num_traits::{WrappingAdd, WrappingSub};
-use std::{iter::FromIterator, ops::Index, result, usize};
+use std::{io::SeekFrom, iter::FromIterator, ops::Index, result, usize};
 use vec_collections::VecSet;
-
-use crate::util::IterExt;
+use super::util::IterExt;
 
 // set for the sparse case
 pub(crate) type IndexSet = VecSet<[u32; 4]>;
@@ -17,7 +15,7 @@ pub(crate) type IndexSet = VecSet<[u32; 4]>;
 pub(crate) type IndexMask = u128;
 
 /// A bitmap with a dense and a sparse case
-#[derive(Debug, Clone, PartialEq, Eq, DagCbor)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Bitmap {
     Dense(DenseBitmap),
     Sparse(SparseBitmap),
@@ -30,10 +28,12 @@ impl Default for Bitmap {
 }
 
 impl Bitmap {
+    #[cfg(test)]
     pub fn new(items: impl IntoIterator<Item = impl IntoIterator<Item = u32>>) -> Self {
         Self::from_iter(items.into_iter())
     }
 
+    #[cfg(test)]
     pub fn is_dense(&self) -> bool {
         match self {
             Self::Dense(_) => true,
@@ -175,6 +175,15 @@ impl SparseBitmap {
     }
 }
 
+impl Encode<DagCborCodec> for Bitmap {
+    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+        match self {
+            Self::Dense(x) => x.encode(c, w),
+            Self::Sparse(x) => x.encode(c, w)
+        }
+    }
+}
+
 impl Encode<DagCborCodec> for SparseBitmap {
     fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
         let mut rows: Vec<Vec<u32>> = self
@@ -196,6 +205,21 @@ impl Encode<DagCborCodec> for DenseBitmap {
         rows.iter_mut().for_each(|row| delta_encode(row));
         rows.encode(c, w)?;
         Ok(())
+    }
+}
+
+impl Decode<DagCborCodec> for Bitmap {
+    fn decode<R: std::io::Read + std::io::Seek>(
+        c: DagCborCodec,
+        r: &mut R,
+    ) -> anyhow::Result<Self> {
+        let p = r.seek(SeekFrom::Current(0))?;
+        if let Ok(bitmap) = DenseBitmap::decode(c, r).map(Into::into) {
+            Ok(bitmap)
+        } else {
+            r.seek(SeekFrom::Start(p))?;
+            SparseBitmap::decode(c, r).map(Into::into)
+        }
     }
 }
 
@@ -273,7 +297,7 @@ fn delta_decode<T: WrappingAdd<Output = T> + Copy>(data: &mut [T]) {
     }
 }
 
-pub struct OneBitsIterator(IndexMask);
+pub(crate) struct OneBitsIterator(IndexMask);
 
 impl Iterator for OneBitsIterator {
     type Item = u32;
@@ -319,8 +343,10 @@ fn to_mask_or_set(iterator: impl IntoIterator<Item = u32>) -> result::Result<Ind
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
-    use libipld::codec::Codec;
+    use libipld::{codec::{Codec, assert_roundtrip}, ipld};
 
     #[test]
     fn dense_1() {
@@ -340,6 +366,33 @@ mod tests {
         for i in 0..bitmap.rows() {
             assert_eq!(bitmap.row(i).collect::<Vec<_>>(), vec![1, 2, 4, 8, 128]);
         }
+    }
+
+    #[test]
+    fn dense_ipld() {
+        let bitmap = Bitmap::new(vec![vec![0, 127]]);
+        assert!(bitmap.is_dense());
+        let expected = ipld! {
+            [[0, 127]]
+        };
+        assert_roundtrip(DagCborCodec, &bitmap, &expected);
+    }
+
+    #[test]
+    fn sparse_ipld() {
+        let bitmap = Bitmap::new(vec![vec![0, 128]]);
+        assert!(!bitmap.is_dense());
+        let expected = ipld! {
+            [[0, 128]]
+        };
+        assert_roundtrip(DagCborCodec, &bitmap, &expected);
+    }
+
+    #[quickcheck]
+    fn bitmap_roundtrip(value: Vec<HashSet<u32>>) -> bool {
+        let bitmap = Bitmap::new(value.clone());
+        let value1: Vec<HashSet<u32>> = bitmap.iter().map(|row| row.collect()).collect();
+        value == value1
     }
 
     #[quickcheck]

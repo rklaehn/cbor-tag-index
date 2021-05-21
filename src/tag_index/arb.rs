@@ -1,8 +1,6 @@
 use std::collections::HashSet;
-
 use quickcheck::Arbitrary;
-
-use crate::*;
+use super::*;
 
 impl Arbitrary for Bitmap {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
