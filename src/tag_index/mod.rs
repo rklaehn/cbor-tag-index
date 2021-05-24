@@ -673,6 +673,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn large_example_encode_decode() -> anyhow::Result<()> {
+        let (index, _query) = create_example(0, 10000, 3)?;
+        println!("events=");
+        for tags in index.tags() {
+            println!("{:?}", tags);
+        }
+        let t0 = Instant::now();
+        let bytes = DagCborCodec.encode(&index)?;
+        let dt_encode = t0.elapsed();
+
+        let t0 = Instant::now();
+        let _rt: TagIndex<Arc<String>> = DagCborCodec.decode(&bytes)?;
+        let dt_decode = t0.elapsed();
+
+        println!("decode {}us", dt_decode.as_micros());
+        println!("encode {}us", dt_encode.as_micros());
+        Ok(())
+    }
+
     fn create_example(
         seed: u64,
         n_events: usize,

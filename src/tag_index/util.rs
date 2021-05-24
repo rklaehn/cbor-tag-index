@@ -40,3 +40,19 @@ where
 }
 
 impl<'a, T: Iterator + Sized + Send + 'a> IterExt<'a> for T {}
+
+/// Create an iterator from a faillble fn
+///
+/// the fn will be called until it returns either Ok(None) or Err(...)
+pub(crate) fn from_fallible_fn<'a, T: 'a>(
+    mut f: impl FnMut() -> anyhow::Result<Option<T>> + 'a,
+) -> impl Iterator<Item = anyhow::Result<T>> + 'a {
+    std::iter::repeat(())
+        .flat_map(move |_| match f() {
+            Err(cause) => vec![Some(Err(cause)), None],
+            Ok(Some(value)) => vec![Some(Ok(value))],
+            Ok(None) => vec![None],
+        })
+        .take_while(|x| x.is_some())
+        .filter_map(|x| x)
+}

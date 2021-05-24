@@ -1,11 +1,20 @@
-use super::util::IterExt;
+use super::util::{from_fallible_fn, IterExt};
 use core::slice;
 use fnv::FnvHashSet;
 use libipld::{
     cbor::DagCborCodec,
     codec::{Decode, Encode},
 };
-use std::{io::SeekFrom, iter::FromIterator, ops::Index, result, usize};
+use libipld_cbor::{
+    decode::{read_len, read_u8},
+    error::UnexpectedCode,
+};
+use std::{
+    io::{Read, Seek, SeekFrom},
+    iter::FromIterator,
+    ops::Index,
+    result, usize,
+};
 use vec_collections::VecSet;
 
 // set for the sparse case
@@ -338,6 +347,54 @@ fn to_mask_or_set(iterator: impl IntoIterator<Item = u32>) -> result::Result<Ind
         }
     }
     Ok(mask)
+}
+
+pub fn read_seq<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode<DagCborCodec>>(
+    _: DagCborCodec,
+    r: &mut R,
+) -> anyhow::Result<C> {
+    let major = read_u8(r)?;
+    let result = match major {
+        0x80..=0x9b => {
+            let len = read_len(r, major - 0x80)?;
+            read_seq_fl(r, len)
+        }
+        0x9f => read_seq_il(r),
+        _ => {
+            return Err(UnexpectedCode::new::<C>(major).into());
+        }
+    };
+    Ok(result)
+}
+
+/// read a fixed length cbor sequence into a generic collection that implements FromIterator
+pub fn read_seq_fl<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode<DagCborCodec>>(
+    r: &mut R,
+    len: usize,
+) -> C {
+    let iter = (0..len).map(|_| T::decode(DagCborCodec, r));
+    C::from_iter(iter)
+}
+
+/// read an indefinite length cbor sequence into a generic collection that implements FromIterator
+pub fn read_seq_il<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode<DagCborCodec>>(
+    r: &mut R,
+) -> C {
+    let iter = from_fallible_fn(|| -> anyhow::Result<Option<T>> {
+        let major = read_u8(r)?;
+        if major == 0xff {
+            return Ok(None);
+        }
+        r.seek(SeekFrom::Current(-1))?;
+        let value = T::decode(DagCborCodec, r)?;
+        Ok(Some(value))
+    });
+    C::from_iter(iter)
+}
+
+struct RowReader {
+    result: std::result::Result<u128, VecSet<[u32; 4]>>,
+    current: u32,
 }
 
 #[cfg(test)]
