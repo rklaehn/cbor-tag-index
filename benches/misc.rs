@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use cbor_tag_index::{DnfQuery, TagIndex, TagSet};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use libipld::codec::Codec;
@@ -5,33 +7,49 @@ use libipld_cbor::DagCborCodec;
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
 
+/// less than 128 distinct tags - dense index
+const DENSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 50)];
+/// more than 128 distinct tags - sparse index
+const SPARSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 100)];
+
 fn create_example(
+    recipe: &[(&str, usize)],
     seed: u64,
     n_events: usize,
     n_terms: usize,
-) -> anyhow::Result<(TagIndex<String>, DnfQuery<String>)> {
+) -> anyhow::Result<(TagIndex<Arc<String>>, DnfQuery<Arc<String>>)> {
     let mut rng = ChaChaRng::seed_from_u64(seed);
     let mut id = || -> String { hex::encode(rng.gen::<u64>().to_be_bytes()) };
-    let mut create_concrete = |prefix: &str, n: usize| -> Vec<String> {
-        (0..n).map(|_| format!("{}-{}", prefix, id())).collect()
+    let mut create_concrete = |prefix: &str, n: usize| -> Vec<Arc<String>> {
+        (0..n)
+            .map(|_| format!("{}-{}", prefix, id()))
+            .map(Arc::new)
+            .collect()
     };
-    let common: Vec<(&str, usize)> = vec![("article", 30), ("sku", 40), ("location", 50)];
-    let tags: Vec<(String, Vec<String>)> = common
-        .into_iter()
-        .map(|(prefix, n)| (prefix.to_owned(), create_concrete(prefix, n)))
+    let tags: Vec<(Arc<String>, Vec<Arc<String>>)> = recipe
+        .iter()
+        .map(|(prefix, n)| (Arc::new((*prefix).to_owned()), create_concrete(prefix, *n)))
         .collect();
     let events = (0..n_events)
         .filter_map(|_| {
             let (common, rare) = tags.choose(&mut rng).unwrap().clone();
             let rare = rare.choose(&mut rng)?.clone();
-            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+            Some(
+                vec![common, rare]
+                    .into_iter()
+                    .collect::<TagSet<Arc<String>>>(),
+            )
         })
         .collect::<Vec<_>>();
     let query = (0..n_terms)
         .filter_map(|_| {
             let (common, rare) = tags.choose(&mut rng).unwrap().clone();
             let rare = rare.choose(&mut rng)?.clone();
-            Some(vec![common, rare].into_iter().collect::<TagSet<String>>())
+            Some(
+                vec![common, rare]
+                    .into_iter()
+                    .collect::<TagSet<Arc<String>>>(),
+            )
         })
         .collect::<Vec<_>>();
     let index = TagIndex::new(&events)?;
@@ -39,21 +57,35 @@ fn create_example(
     Ok((index, query))
 }
 
-fn encode(index: &TagIndex<String>) -> anyhow::Result<Vec<u8>> {
+fn encode(index: &TagIndex<Arc<String>>) -> anyhow::Result<Vec<u8>> {
     DagCborCodec.encode(index)
 }
 
-fn decode(bytes: &[u8]) -> anyhow::Result<TagIndex<String>> {
+fn decode(bytes: &[u8]) -> anyhow::Result<TagIndex<Arc<String>>> {
     DagCborCodec.decode(bytes)
 }
 
-fn criterion_benchmark(c: &mut Criterion) {
-    let (index, query) = create_example(0, 10000, 3).unwrap();
+fn dense(c: &mut Criterion) {
+    let (index, query) = create_example(DENSE, 0, 10000, 3).unwrap();
+    assert!(index.is_dense());
     let bytes = DagCborCodec.encode(&index).unwrap();
-    c.bench_function("decode", |b| b.iter(|| decode(black_box(&bytes))));
-    c.bench_function("encode", |b| b.iter(|| encode(black_box(&index))));
-    c.bench_function("filter", |b| b.iter(|| query.matching(black_box(&index))));
+    c.bench_function("decode_dense", |b| b.iter(|| decode(black_box(&bytes))));
+    c.bench_function("encode_dense", |b| b.iter(|| encode(black_box(&index))));
+    c.bench_function("filter_dense", |b| {
+        b.iter(|| query.matching(black_box(&index)))
+    });
 }
 
-criterion_group!(benches, criterion_benchmark);
+fn sparse(c: &mut Criterion) {
+    let (index, query) = create_example(SPARSE, 0, 10000, 3).unwrap();
+    assert!(!index.is_dense());
+    let bytes = DagCborCodec.encode(&index).unwrap();
+    c.bench_function("decode_sparse", |b| b.iter(|| decode(black_box(&bytes))));
+    c.bench_function("encode_sparse", |b| b.iter(|| encode(black_box(&index))));
+    c.bench_function("filter_sparse", |b| {
+        b.iter(|| query.matching(black_box(&index)))
+    });
+}
+
+criterion_group!(benches, dense, sparse);
 criterion_main!(benches);

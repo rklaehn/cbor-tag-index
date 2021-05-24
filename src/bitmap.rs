@@ -41,7 +41,6 @@ impl Bitmap {
         Self::from_iter(items.into_iter())
     }
 
-    #[cfg(test)]
     pub fn is_dense(&self) -> bool {
         match self {
             Self::Dense(_) => true,

@@ -275,6 +275,10 @@ impl<T: Tag> TagIndex<T> {
     pub fn len(&self) -> usize {
         self.events.len()
     }
+
+    pub fn is_dense(&self) -> bool {
+        self.tags.sets.is_dense()
+    }
 }
 
 impl<T: Tag + Display> Display for TagIndex<T> {
@@ -507,19 +511,15 @@ impl<T: Tag> DnfQueryBuilder<T> {
 
 #[cfg(test)]
 mod tests {
-    use rand::prelude::*;
-    use rand::SeedableRng;
-    use rand_chacha::ChaChaRng;
-    use std::{any, hash::Hasher, sync::Arc, time::Instant};
-
-    use fnv::FnvHasher;
-    use libipld::DagCbor;
     use libipld::{
+        cbor::DagCborCodec,
         codec::{assert_roundtrip, Codec},
-        ipld,
+        ipld, DagCbor,
     };
-    use libipld_cbor::DagCborCodec;
     use quickcheck::Arbitrary;
+    use rand::{prelude::*, SeedableRng};
+    use rand_chacha::ChaChaRng;
+    use std::{sync::Arc, time::Instant};
 
     /// our toy tag
     #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
@@ -648,56 +648,6 @@ mod tests {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
-    }
-
-    #[test]
-    fn large_example_bench_1() -> anyhow::Result<()> {
-        let (index, query) = create_example(0, 10000, 3)?;
-        println!("events=");
-        for tags in index.tags() {
-            println!("{:?}", tags);
-        }
-        println!("");
-        println!("query={}", query);
-        println!("");
-        let t0 = Instant::now();
-        let r = query.matching(&index);
-        let dt = t0.elapsed();
-        let matching = r.iter().filter(|x| **x).count();
-        println!(
-            "n={}\nterms={}\nmatching={}\nduration={}us",
-            index.len(),
-            query.term_count(),
-            matching,
-            dt.as_micros()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn large_example_encode_decode() -> anyhow::Result<()> {
-        let (index, _query) = create_example(0, 10000, 3)?;
-        // let bitmap = index.tags.sets;
-        let t0 = Instant::now();
-        let bytes = DagCborCodec.encode(&index)?;
-        let dt_encode = t0.elapsed();
-
-        let t0 = Instant::now();
-        let _rt: TagIndex<Arc<String>> = DagCborCodec.decode(&bytes)?;
-        let dt_decode = t0.elapsed();
-
-        let t0 = Instant::now();
-        let bytes = DagCborCodec.encode(&index)?;
-        let dt_encode = t0.elapsed();
-
-        let t0 = Instant::now();
-        let _rt: TagIndex<Arc<String>> = DagCborCodec.decode(&bytes)?;
-        let dt_decode = t0.elapsed();
-
-        println!("encoded {} bytes", bytes.len());
-        println!("encode {} us", dt_encode.as_micros());
-        println!("decode {} us", dt_decode.as_micros());
-        Ok(())
     }
 
     fn create_example(
