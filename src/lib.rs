@@ -19,6 +19,8 @@ mod util;
 use bitmap::*;
 #[cfg(test)]
 mod arb;
+#[cfg(test)]
+mod size_tests;
 pub trait Tag: PartialEq + Eq + Hash + Ord + Clone + 'static {}
 
 impl<T: PartialEq + Eq + Hash + Ord + Clone + 'static> Tag for T {}

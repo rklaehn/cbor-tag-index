@@ -21,6 +21,7 @@ quickcheck = "1.0.3"
 rand = "0.8.3"
 rand_chacha = "0.3.0"
 criterion = "0.3.4"
+zstd = "0.8.1"
 
 [[bench]]
 name = "misc"

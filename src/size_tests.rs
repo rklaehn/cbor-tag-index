@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use cbor_tag_index::{DnfQuery, TagIndex, TagSet};
+use std::{io::Cursor, sync::Arc};
+use crate::{DnfQuery, TagIndex, TagSet};
+use libipld::codec::Codec;
+use libipld_cbor::DagCborCodec;
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
 /// less than 128 distinct tags - dense index
@@ -60,13 +62,11 @@ fn create_example(
     Ok((index, query))
 }
 
-fn main() -> anyhow::Result<()> {
-    let (index, query) = create_example(DENSE, EXTRA, 0, 10000, 3)?;
-    let mut n = 0;
-    for _ in 0..1000000 {
-        let result = query.matching(&index);
-        n += result.iter().filter(|x| **x).count();
-    }
-    println!("{}", n);
+#[test]
+fn compression() -> anyhow::Result<()> {
+    let (index, _query) = create_example(DENSE, EXTRA, 0, 10000, 3)?;
+    let encoded = DagCborCodec.encode(&index)?;
+    let compressed = zstd::encode_all(Cursor::new(&encoded), 10)?;
+    println!("{} {}", encoded.len(), compressed.len());
     Ok(())
 }
