@@ -1,4 +1,6 @@
-use super::util::{from_fallible_fn, IterExt};
+use super::util::from_fallible_fn;
+#[cfg(test)]
+use super::util::IterExt;
 use core::slice;
 use fnv::FnvHashSet;
 use libipld::{
@@ -10,7 +12,7 @@ use libipld_cbor::{
     error::UnexpectedCode,
 };
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     iter::FromIterator,
     ops::Index,
     result, usize,
@@ -55,6 +57,7 @@ impl Bitmap {
         }
     }
 
+    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         match self {
             Self::Dense(x) => x.row(index).left_iter(),
@@ -134,6 +137,7 @@ impl DenseBitmap {
         self.0.len()
     }
 
+    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         OneBitsIterator(self.0[index])
     }
@@ -197,13 +201,14 @@ impl SparseBitmap {
         self.0.iter()
     }
 
+    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         self.0[index].iter().cloned()
     }
 }
 
 impl Encode<DagCborCodec> for Bitmap {
-    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+    fn encode<W: Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
         match self {
             Self::Dense(x) => x.encode(c, w),
             Self::Sparse(x) => x.encode(c, w),
@@ -212,7 +217,7 @@ impl Encode<DagCborCodec> for Bitmap {
 }
 
 impl Encode<DagCborCodec> for SparseBitmap {
-    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+    fn encode<W: Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
         let mut rows: Vec<Vec<u32>> = self
             .iter()
             .map(|row_iter| row_iter.into_iter().cloned().collect::<Vec<_>>())
@@ -224,7 +229,7 @@ impl Encode<DagCborCodec> for SparseBitmap {
 }
 
 impl Encode<DagCborCodec> for DenseBitmap {
-    fn encode<W: std::io::Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
+    fn encode<W: Write>(&self, c: DagCborCodec, w: &mut W) -> anyhow::Result<()> {
         let mut rows: Vec<Vec<u32>> = self
             .iter()
             .map(|row| OneBitsIterator(*row).collect::<Vec<_>>())
@@ -246,19 +251,13 @@ impl FromIterator<BitmapRow> for Bitmap {
 }
 
 impl Decode<DagCborCodec> for Bitmap {
-    fn decode<R: std::io::Read + std::io::Seek>(
-        c: DagCborCodec,
-        r: &mut R,
-    ) -> anyhow::Result<Self> {
-        read_seq::<anyhow::Result<Bitmap>, R, BitmapRow>(c, r)
+    fn decode<R: Read + Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
+        read_seq::<_, R, BitmapRow>(c, r)
     }
 }
 
 impl Decode<DagCborCodec> for SparseBitmap {
-    fn decode<R: std::io::Read + std::io::Seek>(
-        c: DagCborCodec,
-        r: &mut R,
-    ) -> anyhow::Result<Self> {
+    fn decode<R: Read + Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
         let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
         rows.iter_mut().for_each(|row| delta_decode(row));
         Ok(Self(
@@ -270,15 +269,12 @@ impl Decode<DagCborCodec> for SparseBitmap {
 }
 
 impl Decode<DagCborCodec> for DenseBitmap {
-    fn decode<R: std::io::Read + std::io::Seek>(
-        c: DagCborCodec,
-        r: &mut R,
-    ) -> anyhow::Result<Self> {
+    fn decode<R: Read + Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
         let mut rows: Vec<Vec<u32>> = Decode::decode(c, r)?;
         rows.iter_mut().for_each(|row| delta_decode(row));
         Ok(Self(
             rows.into_iter()
-                .map(|row| mask_from_bits_iter(row))
+                .map(mask_from_bits_iter)
                 .collect::<anyhow::Result<Vec<_>>>()?,
         ))
     }
@@ -347,8 +343,8 @@ impl Iterator for OneBitsIterator {
 /// If any of the bits is too high, returns an error.
 pub fn mask_from_bits_iter(iterator: impl IntoIterator<Item = u32>) -> anyhow::Result<IndexMask> {
     let mut mask: IndexMask = 0;
-    let mut iter = iterator.into_iter();
-    while let Some(bit) = iter.next() {
+    let iter = iterator.into_iter();
+    for bit in iter {
         anyhow::ensure!(bit < 128);
         mask |= 1u128 << bit;
     }
@@ -429,19 +425,11 @@ pub(crate) struct BitmapRow(
 );
 
 impl BitmapRow {
-    pub fn is_dense(&self) -> bool {
-        self.0.is_ok()
-    }
-
     pub fn as_sparse(self) -> IndexSet {
         match self.0 {
             Ok(mask) => IndexSet::from_iter(OneBitsIterator(mask)),
             Err(set) => set,
         }
-    }
-
-    pub fn as_dense(self) -> std::result::Result<IndexMask, IndexSet> {
-        self.0
     }
 }
 
@@ -459,7 +447,7 @@ impl FromIterator<u32> for BitmapRow {
 
 impl Decode<DagCborCodec> for BitmapRow {
     fn decode<R: Read + Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
-        read_seq::<anyhow::Result<BitmapRow>, R, u32>(c, r)
+        read_seq::<_, R, u32>(c, r)
     }
 }
 

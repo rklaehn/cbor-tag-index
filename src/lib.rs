@@ -196,10 +196,6 @@ impl<T: Tag> DnfQuery<T> {
         }
     }
 
-    pub(crate) fn iter<'a>(&'a self) -> TagSetSetIter<'a, T> {
-        TagSetSetIter(&self.tags, self.sets.iter())
-    }
-
     /// get back the tag sets the dnf query
     pub fn terms(&self) -> impl Iterator<Item = TagSet<T>> + '_ {
         self.sets.iter().map(move |rows| {
@@ -278,6 +274,10 @@ impl<T: Tag> TagIndex<T> {
 
     pub fn is_dense(&self) -> bool {
         self.tags.sets.is_dense()
+    }
+
+    pub fn distinct_sets(&self) -> usize {
+        self.tags.sets.rows()
     }
 }
 
@@ -393,11 +393,8 @@ fn dnf_query0<T: Tag>(
                     })
                     .collect(),
             );
-            for row in 0..index.rows() {
-                result[row] = result[row] && {
-                    let set = &index[row];
-                    dnf.iter().any(move |query| query.is_subset(set))
-                }
+            for (set, value) in index.iter().zip(result.iter_mut()) {
+                *value = *value && { dnf.iter().any(move |query| query.is_subset(set)) }
             }
         }
         Bitmap::Dense(index) => {
@@ -412,16 +409,14 @@ fn dnf_query0<T: Tag>(
                     })
                     .collect(),
             );
-            for i in 0..index.rows() {
-                result[i] = result[i] && {
-                    let set = &index[i];
-                    dnf.iter().any(move |query| is_subset(*query, *set))
-                }
+            for (mask, value) in index.iter().zip(result.iter_mut()) {
+                *value = *value && { dnf.iter().any(move |query| is_subset(*query, *mask)) }
             }
         }
     }
 }
 
+#[inline]
 fn is_subset(a: IndexMask, b: IndexMask) -> bool {
     a & b == a
 }
@@ -517,9 +512,6 @@ mod tests {
         ipld, DagCbor,
     };
     use quickcheck::Arbitrary;
-    use rand::{prelude::*, SeedableRng};
-    use rand_chacha::ChaChaRng;
-    use std::{sync::Arc, time::Instant};
 
     /// our toy tag
     #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DagCbor)]
@@ -545,7 +537,7 @@ mod tests {
         }
     }
 
-    const TAG_NAMES: &[&'static str] = &["a", "b", "c", "d", "e", "f"];
+    const TAG_NAMES: &[&str] = &["a", "b", "c", "d", "e", "f"];
 
     // create a test tag set - each alphanumeric char will be converted to an individual tag.
     fn ts(tags: &str) -> TagSet<TestTag> {
@@ -557,12 +549,12 @@ mod tests {
 
     // create a sequence of tag sets, separated by ,
     fn tss(tags: &str) -> Vec<TagSet<TestTag>> {
-        tags.split(",").map(ts).collect()
+        tags.split(',').map(ts).collect()
     }
 
     // create a dnf query, separated by |
     fn dnf(tags: &str) -> DnfQuery<TestTag> {
-        let parts = tags.split("|").map(ts).collect::<Vec<_>>();
+        let parts = tags.split('|').map(ts).collect::<Vec<_>>();
         DnfQuery::new(&parts).unwrap()
     }
 
@@ -648,49 +640,5 @@ mod tests {
         let bytes = DagCborCodec.encode(&value).unwrap();
         let value1 = DagCborCodec.decode(&bytes).unwrap();
         value == value1
-    }
-
-    fn create_example(
-        seed: u64,
-        n_events: usize,
-        n_terms: usize,
-    ) -> anyhow::Result<(TagIndex<Arc<String>>, DnfQuery<Arc<String>>)> {
-        let mut rng = ChaChaRng::seed_from_u64(seed);
-        let mut id = || -> String { hex::encode(rng.gen::<u64>().to_be_bytes()) };
-        let mut create_concrete = |prefix: &str, n: usize| -> Vec<String> {
-            (0..n).map(|i| format!("{}-{}", prefix, id())).collect()
-        };
-        let common: Vec<(&str, usize)> = vec![("article", 30), ("sku", 40), ("location", 50)];
-        let tags: Vec<(String, Vec<String>)> = common
-            .into_iter()
-            .map(|(prefix, n)| (prefix.to_owned(), create_concrete(prefix, n)))
-            .collect();
-        let events = (0..n_events)
-            .filter_map(|_| {
-                let (common, rare) = tags.choose(&mut rng).unwrap().clone();
-                let rare = rare.choose(&mut rng)?.clone();
-                Some(
-                    vec![common, rare]
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect::<TagSet<Arc<String>>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let query = (0..n_terms)
-            .filter_map(|_| {
-                let (common, rare) = tags.choose(&mut rng).unwrap().clone();
-                let rare = rare.choose(&mut rng)?.clone();
-                Some(
-                    vec![common, rare]
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect::<TagSet<Arc<String>>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let index = TagIndex::new(&events)?;
-        let query = DnfQuery::new(&query)?;
-        Ok((index, query))
     }
 }

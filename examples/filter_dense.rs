@@ -1,16 +1,12 @@
 use std::sync::Arc;
 
 use cbor_tag_index::{DnfQuery, TagIndex, TagSet};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use libipld::codec::Codec;
-use libipld_cbor::DagCborCodec;
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
-
 /// less than 128 distinct tags - dense index
 const DENSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 40)];
-/// more than 128 distinct tags - sparse index
-const SPARSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 100)];
+// more than 128 distinct tags - sparse index
+// const SPARSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 100)];
 /// extra tags that are added randomly to all events
 const EXTRA: &[&str] = &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
 
@@ -65,35 +61,13 @@ fn create_example(
     Ok((index, query))
 }
 
-fn encode(index: &TagIndex<Arc<String>>) -> anyhow::Result<Vec<u8>> {
-    DagCborCodec.encode(index)
+fn main() -> anyhow::Result<()> {
+    let (index, query) = create_example(DENSE, EXTRA, 0, 10000, 3)?;
+    let mut n = 0;
+    for _ in 0..1000000 {
+        let result = query.matching(&index);
+        n += result.iter().filter(|x| **x).count();
+    }
+    println!("{}", n);
+    Ok(())
 }
-
-fn decode(bytes: &[u8]) -> anyhow::Result<TagIndex<Arc<String>>> {
-    DagCborCodec.decode(bytes)
-}
-
-fn dense(c: &mut Criterion) {
-    let (index, query) = create_example(DENSE, EXTRA, 0, 10000, 3).unwrap();
-    assert!(index.is_dense());
-    let bytes = DagCborCodec.encode(&index).unwrap();
-    c.bench_function("decode_dense", |b| b.iter(|| decode(black_box(&bytes))));
-    c.bench_function("encode_dense", |b| b.iter(|| encode(black_box(&index))));
-    c.bench_function("filter_dense", |b| {
-        b.iter(|| query.matching(black_box(&index)))
-    });
-}
-
-fn sparse(c: &mut Criterion) {
-    let (index, query) = create_example(SPARSE, EXTRA, 0, 10000, 3).unwrap();
-    assert!(!index.is_dense());
-    let bytes = DagCborCodec.encode(&index).unwrap();
-    c.bench_function("decode_sparse", |b| b.iter(|| decode(black_box(&bytes))));
-    c.bench_function("encode_sparse", |b| b.iter(|| encode(black_box(&index))));
-    c.bench_function("filter_sparse", |b| {
-        b.iter(|| query.matching(black_box(&index)))
-    });
-}
-
-criterion_group!(benches, dense, sparse);
-criterion_main!(benches);
