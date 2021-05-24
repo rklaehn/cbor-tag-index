@@ -1,3 +1,9 @@
+#[cfg(test)]
+extern crate quickcheck;
+#[cfg(test)]
+#[macro_use(quickcheck)]
+extern crate quickcheck_macros;
+
 use fmt::{Display, Write};
 use fnv::FnvHashMap;
 use libipld::{
@@ -102,18 +108,16 @@ impl<T: Tag + DagCbor> Decode<DagCborCodec> for TagSetSet<T> {
     }
 }
 
-/// A tag index, using a [TagSetSet] to encode the distinct tag sets, and a vector
+/// A tag index, using bitmaps to encode the distinct tag sets, and a vector
 /// of offsets for each event.
 ///
 /// A sequence of events with the following tag sets:
 ///
-///```
-/// [{"a"}, {"a", "b"}, {"b","c"}, {"a"}]
-///```
+/// `[{"a"}, {"a", "b"}, {"b","c"}, {"a"}]`
 ///
 /// would be encoded like this:
 ///
-///```
+/// ```javascript
 /// {
 ///   tags: {
 ///     tags: { "a": 0, "b": 1, "c": 2 },
@@ -121,6 +125,7 @@ impl<T: Tag + DagCbor> Decode<DagCborCodec> for TagSetSet<T> {
 ///       b001, //   a
 ///       b010, //  b
 ///       b110, // cb
+///     ],
 ///   },
 ///   events: [
 ///     0, // first bitset
@@ -158,7 +163,6 @@ impl<T: Tag + DagCbor> Decode<DagCborCodec> for TagIndex<T> {
 }
 
 impl<T: Tag> DnfQuery<T> {
-    #[cfg(test)]
     pub fn new<'a>(sets: impl IntoIterator<Item = &'a TagSet<T>>) -> anyhow::Result<Self> {
         let mut builder = DnfQueryBuilder::new();
         for set in sets {
@@ -167,7 +171,6 @@ impl<T: Tag> DnfQuery<T> {
         Ok(builder.dnf_query())
     }
 
-    #[cfg(test)]
     pub fn matching(&self, index: &TagIndex<T>) -> Vec<bool> {
         let mut matching = vec![true; index.len()];
         self.set_matching(index, &mut matching);
@@ -191,6 +194,22 @@ impl<T: Tag> DnfQuery<T> {
         for (matching, index) in matches.iter_mut().zip(index.events.iter()) {
             *matching = *matching && tmp[*index as usize];
         }
+    }
+
+    pub(crate) fn iter<'a>(&'a self) -> TagSetSetIter<'a, T> {
+        TagSetSetIter(&self.tags, self.sets.iter())
+    }
+
+    /// get back the tag sets the dnf query
+    pub fn terms(&self) -> impl Iterator<Item = TagSet<T>> + '_ {
+        self.sets.iter().map(move |rows| {
+            rows.map(|index| self.tags[index as usize].clone())
+                .collect()
+        })
+    }
+
+    pub fn term_count(&self) -> usize {
+        self.sets.rows()
     }
 }
 
@@ -352,24 +371,6 @@ impl<T: Tag> TagSetSet<T> {
     }
 }
 
-impl<T: Tag> DnfQuery<T> {
-    pub fn iter<'a>(&'a self) -> TagSetSetIter<'a, T> {
-        TagSetSetIter(&self.tags, self.sets.iter())
-    }
-
-    /// get back the tag sets the dnf query
-    pub fn terms(&self) -> impl Iterator<Item = TagSet<T>> + '_ {
-        self.sets.iter().map(move |rows| {
-            rows.map(|index| self.tags[index as usize].clone())
-                .collect()
-        })
-    }
-
-    pub fn term_count(&self) -> usize {
-        self.sets.rows()
-    }
-}
-
 /// performs a dnf query on an index, given a lookup table to translate from the dnf query to the index domain
 fn dnf_query0<T: Tag>(
     index: &Bitmap,
@@ -421,7 +422,7 @@ fn is_subset(a: IndexMask, b: IndexMask) -> bool {
     a & b == a
 }
 
-pub struct TagSetSetIter<'a, T>(&'a [T], BitmapRowsIter<'a>);
+pub(crate) struct TagSetSetIter<'a, T>(&'a [T], BitmapRowsIter<'a>);
 
 impl<'a, T> Iterator for TagSetSetIter<'a, T> {
     type Item = TagRefIter<'a, T>;
@@ -431,7 +432,7 @@ impl<'a, T> Iterator for TagSetSetIter<'a, T> {
     }
 }
 
-pub struct TagRefIter<'a, T>(&'a [T], BitmapRowIter<'a>);
+pub(crate) struct TagRefIter<'a, T>(&'a [T], BitmapRowIter<'a>);
 
 impl<'a, T> Iterator for TagRefIter<'a, T> {
     type Item = &'a T;
@@ -442,7 +443,7 @@ impl<'a, T> Iterator for TagRefIter<'a, T> {
 }
 
 #[derive(Debug)]
-pub struct DnfQueryBuilder<T: Tag> {
+pub(crate) struct DnfQueryBuilder<T: Tag> {
     tags: FnvHashMap<T, u32>,
     sets: FnvHashMap<IndexSet, u32>,
 }
@@ -676,10 +677,7 @@ mod tests {
     #[test]
     fn large_example_encode_decode() -> anyhow::Result<()> {
         let (index, _query) = create_example(0, 10000, 3)?;
-        println!("events=");
-        for tags in index.tags() {
-            println!("{:?}", tags);
-        }
+        // let bitmap = index.tags.sets;
         let t0 = Instant::now();
         let bytes = DagCborCodec.encode(&index)?;
         let dt_encode = t0.elapsed();
@@ -688,8 +686,17 @@ mod tests {
         let _rt: TagIndex<Arc<String>> = DagCborCodec.decode(&bytes)?;
         let dt_decode = t0.elapsed();
 
-        println!("decode {}us", dt_decode.as_micros());
-        println!("encode {}us", dt_encode.as_micros());
+        let t0 = Instant::now();
+        let bytes = DagCborCodec.encode(&index)?;
+        let dt_encode = t0.elapsed();
+
+        let t0 = Instant::now();
+        let _rt: TagIndex<Arc<String>> = DagCborCodec.decode(&bytes)?;
+        let dt_decode = t0.elapsed();
+
+        println!("encoded {} bytes", bytes.len());
+        println!("encode {} us", dt_encode.as_micros());
+        println!("decode {} us", dt_decode.as_micros());
         Ok(())
     }
 

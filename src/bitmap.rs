@@ -63,6 +63,26 @@ impl Bitmap {
         }
     }
 
+    pub fn push_row(self, row: BitmapRow) -> Self {
+        match self {
+            Self::Dense(mut inner) => match row.0 {
+                Ok(mask) => {
+                    inner.0.push(mask);
+                    inner.into()
+                }
+                Err(set) => {
+                    let mut inner = SparseBitmap::from(inner);
+                    inner.0.push(set);
+                    inner.into()
+                }
+            },
+            Self::Sparse(mut inner) => {
+                inner.0.push(row.as_sparse());
+                inner.into()
+            }
+        }
+    }
+
     pub fn push(self, iter: impl IntoIterator<Item = u32>) -> Self {
         match self {
             Self::Dense(mut inner) => match to_mask_or_set(iter) {
@@ -216,18 +236,22 @@ impl Encode<DagCborCodec> for DenseBitmap {
     }
 }
 
+impl FromIterator<BitmapRow> for Bitmap {
+    fn from_iter<T: IntoIterator<Item = BitmapRow>>(iter: T) -> Self {
+        let mut res = Bitmap::default();
+        for row in iter.into_iter() {
+            res = res.push_row(row)
+        }
+        res
+    }
+}
+
 impl Decode<DagCborCodec> for Bitmap {
     fn decode<R: std::io::Read + std::io::Seek>(
         c: DagCborCodec,
         r: &mut R,
     ) -> anyhow::Result<Self> {
-        let p = r.seek(SeekFrom::Current(0))?;
-        if let Ok(bitmap) = DenseBitmap::decode(c, r).map(Into::into) {
-            Ok(bitmap)
-        } else {
-            r.seek(SeekFrom::Start(p))?;
-            SparseBitmap::decode(c, r).map(Into::into)
-        }
+        read_seq::<anyhow::Result<Bitmap>, R, BitmapRow>(c, r)
     }
 }
 
@@ -352,19 +376,25 @@ fn to_mask_or_set(iterator: impl IntoIterator<Item = u32>) -> result::Result<Ind
 pub fn read_seq<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode<DagCborCodec>>(
     _: DagCborCodec,
     r: &mut R,
-) -> anyhow::Result<C> {
-    let major = read_u8(r)?;
-    let result = match major {
-        0x80..=0x9b => {
-            let len = read_len(r, major - 0x80)?;
-            read_seq_fl(r, len)
-        }
-        0x9f => read_seq_il(r),
-        _ => {
-            return Err(UnexpectedCode::new::<C>(major).into());
-        }
+) -> C {
+    let inner = |r: &mut R| -> anyhow::Result<C> {
+        let major = read_u8(r)?;
+        let result = match major {
+            0x80..=0x9b => {
+                let len = read_len(r, major - 0x80)?;
+                read_seq_fl(r, len)
+            }
+            0x9f => read_seq_il(r),
+            _ => {
+                return Err(UnexpectedCode::new::<C>(major).into());
+            }
+        };
+        Ok(result)
     };
-    Ok(result)
+    match inner(r) {
+        Ok(value) => value,
+        Err(cause) => C::from_iter(std::iter::once(Err(cause))),
+    }
 }
 
 /// read a fixed length cbor sequence into a generic collection that implements FromIterator
@@ -392,9 +422,46 @@ pub fn read_seq_il<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode
     C::from_iter(iter)
 }
 
-struct RowReader {
-    result: std::result::Result<u128, VecSet<[u32; 4]>>,
-    current: u32,
+/// A single row of a dense or sparse bitmap
+pub(crate) struct BitmapRow(
+    /// ok -> result fits into a IndexMask
+    /// err -> we had to use an IndexSet
+    std::result::Result<IndexMask, IndexSet>,
+);
+
+impl BitmapRow {
+    pub fn is_dense(&self) -> bool {
+        self.0.is_ok()
+    }
+
+    pub fn as_sparse(self) -> IndexSet {
+        match self.0 {
+            Ok(mask) => IndexSet::from_iter(OneBitsIterator(mask)),
+            Err(set) => set,
+        }
+    }
+
+    pub fn as_dense(self) -> std::result::Result<IndexMask, IndexSet> {
+        self.0
+    }
+}
+
+impl FromIterator<u32> for BitmapRow {
+    fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> Self {
+        // add the delta decoding
+        let mut offset = 0u32;
+        let iter = iter.into_iter().map(move |x| {
+            offset = offset.wrapping_add(x);
+            offset
+        });
+        BitmapRow(to_mask_or_set(iter))
+    }
+}
+
+impl Decode<DagCborCodec> for BitmapRow {
+    fn decode<R: Read + Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
+        read_seq::<anyhow::Result<BitmapRow>, R, u32>(c, r)
+    }
 }
 
 #[cfg(test)]
