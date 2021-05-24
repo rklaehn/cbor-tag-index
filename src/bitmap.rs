@@ -388,7 +388,7 @@ pub fn read_seq<C: FromIterator<anyhow::Result<T>>, R: Read + Seek, T: Decode<Da
     };
     match inner(r) {
         Ok(value) => value,
-        Err(cause) => C::from_iter(std::iter::once(Err(cause))),
+        Err(cause) => C::from_iter(Some(Err(cause))),
     }
 }
 

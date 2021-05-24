@@ -1,9 +1,9 @@
-use std::{io::Cursor, sync::Arc};
 use crate::{DnfQuery, TagIndex, TagSet};
 use libipld::codec::Codec;
 use libipld_cbor::DagCborCodec;
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
+use std::{io::Cursor, sync::Arc};
 /// less than 128 distinct tags - dense index
 const DENSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 40)];
 // more than 128 distinct tags - sparse index

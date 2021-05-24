@@ -51,12 +51,13 @@ impl<'a, T: Iterator + Sized + Send + 'a> IterExt<'a> for T {}
 pub(crate) fn from_fallible_fn<'a, T: 'a>(
     mut f: impl FnMut() -> anyhow::Result<Option<T>> + 'a,
 ) -> impl Iterator<Item = anyhow::Result<T>> + 'a {
-    std::iter::repeat(())
-        .flat_map(move |_| match f() {
-            Err(cause) => vec![Some(Err(cause)), None],
-            Ok(Some(value)) => vec![Some(Ok(value))],
-            Ok(None) => vec![None],
-        })
-        .take_while(|x| x.is_some())
-        .filter_map(|x| x)
+    let mut done = false;
+    std::iter::from_fn(move || match f() {
+        Err(cause) if !done => {
+            done = true;
+            Some(Err(cause))
+        }
+        Ok(Some(value)) if !done => Some(Ok(value)),
+        _ => None,
+    })
 }

@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use cbor_tag_index::{DnfQuery, TagIndex, TagSet};
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
+use std::sync::Arc;
 /// less than 128 distinct tags - dense index
 const DENSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 40)];
 // more than 128 distinct tags - sparse index
