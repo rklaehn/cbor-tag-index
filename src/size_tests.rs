@@ -4,9 +4,9 @@ use libipld::codec::Codec;
 use libipld_cbor::DagCborCodec;
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
-/// less than 128 distinct tags - dense index
+/// less than BITS distinct tags - dense index
 const DENSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 40)];
-// more than 128 distinct tags - sparse index
+// more than BITS distinct tags - sparse index
 // const SPARSE: &[(&str, usize)] = &[("article", 30), ("sku", 40), ("location", 100)];
 /// extra tags that are added randomly to all events
 const EXTRA: &[&str] = &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
