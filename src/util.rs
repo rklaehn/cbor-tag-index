@@ -1,3 +1,12 @@
+use std::{io, iter::FromIterator};
+
+use libipld::codec::Decode;
+use libipld_cbor::{
+    decode::{read_len, read_u8},
+    error::UnexpectedCode,
+    DagCborCodec,
+};
+
 /// Like the one from itertools, but more convenient
 #[cfg(test)]
 pub(crate) enum EitherIter<L, R> {
@@ -60,4 +69,65 @@ pub(crate) fn from_fallible_fn<'a, T: 'a>(
         Ok(Some(value)) if !done => Some(Ok(value)),
         _ => None,
     })
+}
+
+pub fn read_seq<
+    C: FromIterator<anyhow::Result<T>>,
+    R: io::Read + io::Seek,
+    T: Decode<DagCborCodec>,
+>(
+    _: DagCborCodec,
+    r: &mut R,
+) -> C {
+    let inner = |r: &mut R| -> anyhow::Result<C> {
+        let major = read_u8(r)?;
+        let result = match major {
+            0x80..=0x9b => {
+                let len = read_len(r, major - 0x80)?;
+                read_seq_fl(r, len)
+            }
+            0x9f => read_seq_il(r),
+            _ => {
+                return Err(UnexpectedCode::new::<C>(major).into());
+            }
+        };
+        Ok(result)
+    };
+    match inner(r) {
+        Ok(value) => value,
+        Err(cause) => C::from_iter(Some(Err(cause))),
+    }
+}
+
+/// read a fixed length cbor sequence into a generic collection that implements FromIterator
+pub fn read_seq_fl<
+    C: FromIterator<anyhow::Result<T>>,
+    R: io::Read + io::Seek,
+    T: Decode<DagCborCodec>,
+>(
+    r: &mut R,
+    len: usize,
+) -> C {
+    let iter = (0..len).map(|_| T::decode(DagCborCodec, r));
+    C::from_iter(iter)
+}
+
+/// read an indefinite length cbor sequence into a generic collection that implements FromIterator
+pub fn read_seq_il<
+    C: FromIterator<anyhow::Result<T>>,
+    R: io::Read + io::Seek,
+    T: Decode<DagCborCodec>,
+>(
+    r: &mut R,
+) -> C {
+    let iter = from_fallible_fn(|| -> anyhow::Result<Option<T>> {
+        let major = read_u8(r)?;
+        if major == 0xff {
+            return Ok(None);
+        }
+        r.seek(io::SeekFrom::Current(-1))?;
+        let value = T::decode(DagCborCodec, r)?;
+        Ok(Some(value))
+    });
+    C::from_iter(iter)
 }
