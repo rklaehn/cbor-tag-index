@@ -71,14 +71,12 @@ pub(crate) fn from_fallible_fn<'a, T: 'a>(
     })
 }
 
-pub fn read_seq<
+pub fn read_seq<C, R, T>(r: &mut R) -> C
+where
     C: FromIterator<anyhow::Result<T>>,
     R: io::Read + io::Seek,
     T: Decode<DagCborCodec>,
->(
-    _: DagCborCodec,
-    r: &mut R,
-) -> C {
+{
     let inner = |r: &mut R| -> anyhow::Result<C> {
         let major = read_u8(r)?;
         let result = match major {
@@ -93,6 +91,7 @@ pub fn read_seq<
         };
         Ok(result)
     };
+    // this is just so we don't have to return anyhow::Result<anyhow::Result<C>>
     match inner(r) {
         Ok(value) => value,
         Err(cause) => C::from_iter(Some(Err(cause))),
@@ -100,26 +99,23 @@ pub fn read_seq<
 }
 
 /// read a fixed length cbor sequence into a generic collection that implements FromIterator
-pub fn read_seq_fl<
+pub fn read_seq_fl<C, R, T>(r: &mut R, len: usize) -> C
+where
     C: FromIterator<anyhow::Result<T>>,
     R: io::Read + io::Seek,
     T: Decode<DagCborCodec>,
->(
-    r: &mut R,
-    len: usize,
-) -> C {
+{
     let iter = (0..len).map(|_| T::decode(DagCborCodec, r));
     C::from_iter(iter)
 }
 
 /// read an indefinite length cbor sequence into a generic collection that implements FromIterator
-pub fn read_seq_il<
+pub fn read_seq_il<C, R, T>(r: &mut R) -> C
+where
     C: FromIterator<anyhow::Result<T>>,
     R: io::Read + io::Seek,
     T: Decode<DagCborCodec>,
->(
-    r: &mut R,
-) -> C {
+{
     let iter = from_fallible_fn(|| -> anyhow::Result<Option<T>> {
         let major = read_u8(r)?;
         if major == 0xff {

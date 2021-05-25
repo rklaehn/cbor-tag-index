@@ -243,8 +243,8 @@ impl FromIterator<BitmapRow> for Bitmap {
 }
 
 impl Decode<DagCborCodec> for Bitmap {
-    fn decode<R: io::Read + io::Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
-        read_seq::<_, R, BitmapRow>(c, r)
+    fn decode<R: io::Read + io::Seek>(_: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
+        read_seq::<_, R, BitmapRow>(r)
     }
 }
 
@@ -389,8 +389,8 @@ impl FromIterator<u32> for BitmapRow {
 }
 
 impl Decode<DagCborCodec> for BitmapRow {
-    fn decode<R: io::Read + io::Seek>(c: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
-        read_seq::<_, R, u32>(c, r)
+    fn decode<R: io::Read + io::Seek>(_: DagCborCodec, r: &mut R) -> anyhow::Result<Self> {
+        read_seq::<_, R, u32>(r)
     }
 }
 
