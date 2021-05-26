@@ -19,7 +19,7 @@ fn create_example(
     n_terms: usize,
 ) -> anyhow::Result<(TagIndex<Arc<String>>, DnfQuery<Arc<String>>)> {
     let extra = extra
-        .into_iter()
+        .iter()
         .map(|x| Arc::new((*x).to_owned()))
         .collect::<Vec<_>>();
     let mut rng = ChaChaRng::seed_from_u64(seed);
