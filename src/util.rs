@@ -105,8 +105,7 @@ where
     R: io::Read + io::Seek,
     T: Decode<DagCborCodec>,
 {
-    let iter = (0..len).map(|_| T::decode(DagCborCodec, r));
-    C::from_iter(iter)
+    (0..len).map(|_| T::decode(DagCborCodec, r)).collect()
 }
 
 /// read an indefinite length cbor sequence into a generic collection that implements FromIterator
@@ -116,7 +115,7 @@ where
     R: io::Read + io::Seek,
     T: Decode<DagCborCodec>,
 {
-    let iter = from_fallible_fn(|| -> anyhow::Result<Option<T>> {
+    from_fallible_fn(|| -> anyhow::Result<Option<T>> {
         let major = read_u8(r)?;
         if major == 0xff {
             return Ok(None);
@@ -124,6 +123,6 @@ where
         r.seek(io::SeekFrom::Current(-1))?;
         let value = T::decode(DagCborCodec, r)?;
         Ok(Some(value))
-    });
-    C::from_iter(iter)
+    })
+    .collect()
 }

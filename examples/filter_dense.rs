@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use cbor_tag_index::{DnfQuery, TagIndex, TagSet};
 use rand::{prelude::*, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -17,7 +18,7 @@ fn create_example(
     n_terms: usize,
 ) -> anyhow::Result<(TagIndex<Arc<String>>, DnfQuery<Arc<String>>)> {
     let extra = extra
-        .into_iter()
+        .iter()
         .map(|x| Arc::new((*x).to_owned()))
         .collect::<Vec<_>>();
     let mut rng = ChaChaRng::seed_from_u64(seed);

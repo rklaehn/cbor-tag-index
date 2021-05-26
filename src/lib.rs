@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 #[cfg(test)]
 extern crate quickcheck;
 #[cfg(test)]
@@ -221,7 +222,7 @@ impl<T: Tag + Display> Display for DnfQuery<T> {
         };
         let res = self
             .terms()
-            .map(|term| term_to_string(term))
+            .map(term_to_string)
             .collect::<Vec<_>>()
             .join(" | ");
         f.write_str(&res)
@@ -268,6 +269,10 @@ impl<T: Tag> TagIndex<T> {
         self.events
             .iter()
             .map(move |offset| lut[*offset as usize].clone())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
@@ -333,7 +338,7 @@ impl<T: Tag> From<TagSetSet<T>> for DnfQuery<T> {
         for (tag, index) in value.tags {
             tags[index as usize] = Some(tag)
         }
-        let tags: Vec<T> = tags.into_iter().filter_map(|x| x).collect();
+        let tags: Vec<T> = tags.into_iter().flatten().collect();
         Self {
             tags,
             sets: value.sets,
@@ -474,7 +479,7 @@ impl<T: Tag> DnfQueryBuilder<T> {
         for (tag, index) in self.tags {
             tags[index as usize] = Some(tag)
         }
-        let tags = tags.into_iter().filter_map(|x| x).collect();
+        let tags = tags.into_iter().flatten().collect();
         let mut sets = vec![IndexSet::default(); self.sets.len()];
         for (set, index) in self.sets {
             sets[index as usize] = set
@@ -576,11 +581,10 @@ mod tests {
     }
 
     #[test]
-    fn tag_index_query_tests() -> anyhow::Result<()> {
+    fn tag_index_query_tests() {
         assert_eq!(&matches(" a,ab,bc, a", "ab"), "0100");
         assert_eq!(&matches(" a, a, a, a", "ab"), "0000");
         assert_eq!(&matches(" a, a, a,ab", "ab|c|d"), "0001");
-        Ok(())
     }
 
     #[test]

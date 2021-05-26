@@ -71,7 +71,7 @@ impl Bitmap {
                 }
             },
             Self::Sparse(mut inner) => {
-                inner.0.push(row.as_sparse());
+                inner.0.push(row.into_sparse());
                 inner.into()
             }
         }
@@ -368,9 +368,9 @@ pub(crate) struct BitmapRow(
 );
 
 impl BitmapRow {
-    pub fn as_sparse(self) -> IndexSet {
+    pub fn into_sparse(self) -> IndexSet {
         match self.0 {
-            Ok(mask) => IndexSet::from_iter(OneBitsIterator(mask)),
+            Ok(mask) => OneBitsIterator(mask).collect(),
             Err(set) => set,
         }
     }
@@ -460,7 +460,7 @@ mod tests {
 
     #[quickcheck]
     fn delta_decode_roundtrip(mut values: Vec<u32>) -> bool {
-        values.sort();
+        values.sort_unstable();
         values.dedup();
         let reference = values.clone();
         delta_encode(&mut values);
