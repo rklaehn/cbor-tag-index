@@ -174,6 +174,22 @@ impl<T: Tag> DnfQuery<T> {
         Ok(builder.dnf_query())
     }
 
+    /// An empty dnf query which matches nothing
+    pub fn empty() -> Self {
+        Self {
+            tags: Default::default(),
+            sets: Default::default(),
+        }
+    }
+
+    /// a dnf query containing an empty set, which matches everything
+    pub fn all() -> Self {
+        Self {
+            tags: Default::default(),
+            sets: Bitmap::new(vec![vec![]]),
+        }
+    }
+
     pub fn matching(&self, index: &TagIndex<T>) -> Vec<bool> {
         let mut matching = vec![true; index.len()];
         self.set_matching(index, &mut matching);
@@ -269,6 +285,13 @@ impl<T: Tag> TagIndex<T> {
         self.events
             .iter()
             .map(move |offset| lut[*offset as usize].clone())
+    }
+
+    pub fn get(&self, index: usize) -> Option<TagSet<T>> {
+        let mask_index = self.events.get(index)?;
+        let mask = self.tags.sets.row(*mask_index as usize);
+        let lut = self.tags.lut();
+        Some(mask.map(|i| lut[i as usize].clone()).collect())
     }
 
     pub fn is_empty(&self) -> bool {

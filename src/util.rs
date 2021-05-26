@@ -8,13 +8,11 @@ use libipld_cbor::{
 };
 
 /// Like the one from itertools, but more convenient
-#[cfg(test)]
 pub(crate) enum EitherIter<L, R> {
     Left(L),
     Right(R),
 }
 
-#[cfg(test)]
 impl<L, R, T> Iterator for EitherIter<L, R>
 where
     L: Iterator<Item = T>,
@@ -41,12 +39,10 @@ where
         Box::new(self)
     }
 
-    #[cfg(test)]
     fn left_iter<R>(self) -> EitherIter<Self, R> {
         EitherIter::Left(self)
     }
 
-    #[cfg(test)]
     fn right_iter<L>(self) -> EitherIter<L, Self> {
         EitherIter::Right(self)
     }

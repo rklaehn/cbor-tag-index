@@ -1,7 +1,4 @@
-use crate::util::read_seq;
-
-#[cfg(test)]
-use super::util::IterExt;
+use super::util::{read_seq, IterExt};
 use core::slice;
 use fnv::FnvHashSet;
 use libipld::{
@@ -30,7 +27,6 @@ impl Default for Bitmap {
 }
 
 impl Bitmap {
-    #[cfg(test)]
     pub fn new(items: impl IntoIterator<Item = impl IntoIterator<Item = u32>>) -> Self {
         Self::from_iter(items.into_iter())
     }
@@ -49,7 +45,6 @@ impl Bitmap {
         }
     }
 
-    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         match self {
             Self::Dense(x) => x.row(index).left_iter(),
@@ -129,7 +124,6 @@ impl DenseBitmap {
         self.0.len()
     }
 
-    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         OneBitsIterator(self.0[index])
     }
@@ -193,7 +187,6 @@ impl SparseBitmap {
         self.0.iter()
     }
 
-    #[cfg(test)]
     pub fn row(&self, index: usize) -> impl Iterator<Item = u32> + '_ {
         self.0[index].iter().cloned()
     }
